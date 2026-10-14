@@ -1,16 +1,30 @@
 {
   "name": "motive-mem",
   "version": "0.1.0",
-  "description": "턴마다 바뀐 코드를 저장소의 .claude/principles.md 에 비춰 의도·원칙 위반·땜질을 리뷰하고 패널에 보여 준다",
+  "description": "After every turn, a separate model reviews what changed against your repo's .claude/principles.md — intent, principle violations, band-aid fixes — and shows it in a panel",
   "author": {
     "name": "wjsekrud"
   },
+  "homepage": "https://github.com/wjsekrud/Motive-mem",
+  "repository": "https://github.com/wjsekrud/Motive-mem",
+  "license": "MIT",
+  "keywords": ["code-review", "intent", "principles", "drift", "mod"],
   "types": "./types/index.d.ts",
   "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "Language of the panel, status line and review text (en: English, ko: 한국어). Principles files can be in any language.",
+      "default": "en",
+      "options": [
+        "en",
+        "ko"
+      ]
+    },
     "model": {
       "type": "string",
-      "title": "리뷰 모델",
-      "description": "리뷰를 맡을 모델. 판단이 어려울수록 opus 가 낫고 비용은 더 든다.",
+      "title": "Review model",
+      "description": "The model that reviews. opus judges hard cases better and costs more.",
       "default": "sonnet",
       "options": [
         "sonnet",
@@ -20,8 +34,8 @@
     },
     "effort": {
       "type": "string",
-      "title": "리뷰 추론 강도",
-      "description": "리뷰 모델이 얼마나 깊이 생각할지.",
+      "title": "Review effort",
+      "description": "How hard the review model thinks.",
       "default": "medium",
       "options": [
         "low",
@@ -31,14 +45,14 @@
     },
     "maxDiffChars": {
       "type": "number",
-      "title": "리뷰에 넣는 diff 최대 글자 수",
-      "description": "넘치면 코드 파일부터 넣고 나머지는 목록만 준다.",
+      "title": "Max diff characters per review",
+      "description": "Past this, code files go in first and the rest are listed by name only.",
       "default": 60000
     },
     "openOnIssue": {
       "type": "boolean",
-      "title": "지적이 있으면 패널 열기",
-      "description": "위반·의심·보고 밖 변경이 있으면 의도 리뷰 패널을 연다.",
+      "title": "Open the panel on findings",
+      "description": "Open the intent review panel when there is a violation, a suspect or a change missing from the report.",
       "default": true
     }
   }

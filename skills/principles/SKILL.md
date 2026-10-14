@@ -1,194 +1,237 @@
 ---
 name: principles
-description: motive-mem 모드가 기준으로 삼는 저장소 원칙 파일 `.claude/principles.md` 를 만들거나 손본다. 원칙을 새로 짓지 않고 CLAUDE.md · 설계 문서 · 코드와 검사의 docstring · 되돌린 커밋 · 모드의 리뷰 기록처럼 이미 있는 증거에서 사람이 정해 둔 원칙을 찾아 확인받는다. 사용자가 원칙 파일을 만들자고 할 때("principles.md 초기 설정", "의도 리뷰 원칙 만들어줘"), /motive-mem 가 원칙 파일이 없다고 할 때, 원칙을 더하거나 빼거나 범위를 좁히자고 할 때("이 원칙 너무 자주 걸려", "이건 예외로 넣어줘"), 리뷰가 자꾸 틀린 지적을 할 때 쓴다.
+description: Create or revise `.claude/principles.md`, the repository principles file the motive-mem mode reviews against. It does not invent principles — it digs out the ones people already settled, from CLAUDE.md, design docs, docstrings of code and tests, reverted commits and the mode's own review logs, and has the human confirm them. Use when the user wants a principles file ("set up principles.md", "make principles for intent review", "의도 리뷰 원칙 만들어줘"), when /motive-mem says there is no principles file, when the user wants to add, drop or narrow a principle ("this principle fires too often", "make this an exception", "이 원칙 너무 자주 걸려"), or when reviews keep raising wrong findings.
 user-invocable: true
 ---
 
-# 의도 리뷰 원칙 파일
+# Intent review principles file
 
-## 이 파일이 하는 일
+## What this file does
 
-motive-mem 모드는 턴이 끝날 때마다 별도 모델에게 네 가지만 준다 — 이 원칙 파일, 사용자의 요청, Claude 의 마지막
-보고, diff. 리뷰어는 코드베이스를 보지 못한다. 그래서 원칙 하나하나는 **그 문장과 diff 만으로** 어겼는지 판단할 수
-있어야 한다.
+After every turn, the motive-mem mode hands a separate model four things only — this principles file, the user's
+request, Claude's last report, and the diff. The reviewer cannot see the codebase. So every principle must be
+judgeable **from its own sentences and the diff alone**.
 
-리뷰어는 원칙 파일과 상관없이 이미 다음을 본다(모드의 시스템 프롬프트에 있다):
+The reviewer already checks the following regardless of the principles file (it is in the mode's system prompt):
 
-- 의도 일치 — 보고에 없는 변경, 부풀린 보고("검사 통과"를 "사용자 확인"으로), 요청 밖 변경
-- 땜질 흔적 — 단일 진입점 우회, 이미 있는 판정·식의 두 번째 사본, 특정 경우만 고치는 분기, 삼킨 예외, 테스트
-  기대값·스냅숏 바꾸기, skip·xfail, 대기 시간 늘리기, 특정 과제 전용 플래그
+- Intent match — changes missing from the report, an overstated report ("checks pass" passed off as "the user
+  confirmed"), changes outside the request
+- Band-aid traces — bypassing a single entry point, a second copy of an existing rule or formula, a branch that fixes
+  only one case, swallowed exceptions, changed test expectations or snapshots, skip/xfail, longer waits, a flag for
+  one particular task
 
-그러므로 "한 번에 하나만", "테스트를 약화하지 말 것" 같은 일반 규칙을 원칙 파일에 다시 적을 필요가 없다. 원칙 파일이
-맡는 것은 **이 저장소에만 있는 것**이다 — 어느 층이 어느 층을 모르는가, 쓰기는 어느 한 길로 가는가, 판정·식의
-"그 한 곳"이 어디인가, 지켜야 할 약속(결정성·계약·보존)이 무엇인가. 리뷰어는 "단일 진입점을 건너뛰었다"는 패턴은
-알지만, 이 저장소에서 그 진입점이 `commands.py` 라는 것은 원칙 파일이 알려 줘야 안다.
+So general rules like "one thing at a time" or "don't weaken tests" need not be written again. What the principles
+file covers is **what only this repository has** — which layer must not know which, which single path writes go
+through, where "the one place" for a rule or formula is, which promises (determinism, contracts, preservation) must
+hold. The reviewer knows the pattern "skipped the single entry point", but only the principles file can tell it that
+in this repository the entry point is `commands.py`.
 
-## 원칙이 되는 조건
+## When a candidate is a principle
 
-원칙이 많을수록 리뷰가 좋아지지 않는다. 원칙 하나가 늘면 모든 리뷰에서 그만큼 지적이 늘고, 틀린 지적이 쌓이면
-사람은 패널을 안 보게 된다. 그때부터 모드는 비용만 든다. 원칙 파일이 불어나는 것 자체가 이 모드가 막으려는
-드리프트다 — 더하는 데는 근거가 필요하고, 빼는 데는 근거가 틀렸다는 것만 있으면 된다.
+More principles do not make reviews better. Each added principle adds findings to every review, and once wrong
+findings pile up people stop looking at the panel. From then on the mode is pure cost. The principles file growing is
+itself the drift this mode exists to stop — adding needs evidence; removing needs only that the evidence was wrong.
 
-후보 하나를 넣을지는 넷으로 판단한다.
+Decide each candidate by four tests.
 
-1. **비국소적인가.** 어기면 바뀐 줄 바깥 — 다른 모듈, 다음 작업, 보존돼야 할 성질 — 이 깨지는가. 그 줄만 보기
-   싫어지는 것(이름·형식·취향)은 린터와 코드 리뷰의 일이지 원칙이 아니다.
-2. **유혹이 있는가.** 눈앞의 문제를 빨리 풀려면 어기고 싶어지는 지름길이 있는가. 유혹은 사람만의 것이 아니다 —
-   포매터·import 정렬·"린터 경고를 고치려는" 손도 원칙을 어긴다. 아무도 어길 이유가 없는 규칙은 지적이 나올 일도
-   없으니 자리만 차지한다. 과거에 실제로 어긴 기록이 가장 좋은 답이다.
-3. **diff 에서 보이는가.** 원칙 문장과 diff 만 가진 리뷰어가 판단할 수 있는가. 실행해 봐야 아는 것(성능·결과의
-   정확성)은 그대로 적지 말고 diff 에 드러나는 징후로 바꿔 적거나 뺀다. "같은 seed 면 같은 결과"는 실행해야
-   알지만, "기존 단계의 난수 호출 순서를 바꾸지 않는다"는 diff 에서 보인다.
-4. **사람이 이미 정했는가.** 사람이 저장소에 두고 따르게 한 것은 Claude 가 받아 적었더라도 사람의 것이다 —
-   CLAUDE.md, 설계 문서, 불변식을 말하는 검사와 docstring 이 여기 든다. "작가 결정"·"사용자 답" 표시가 붙은 줄이
-   가장 세고, 근거 칸에 그렇게 적는다. 사람의 것이 아닌 것은 **이번 조사에서 코드 구조를 보고 추정한 것**이다 —
-   그건 원칙이 아니라 질문이다. 표에 올리고 사람이 답하면 넣는다. 이 파일은 Claude 의 설계 의견을 담는 곳이 아니다.
+1. **Is it non-local?** Breaking it breaks something outside the changed lines — another module, the next task, a
+   property that must be preserved. Things that only make those lines unpleasant to look at (names, format, taste)
+   are the job of linters and code review, not principles.
+2. **Is there a temptation?** Is there a shortcut that makes breaking it attractive for solving the problem at hand
+   quickly? Temptation is not only human — formatters, import sorting and a quick edit that "fixes" a linter warning
+   break principles too. A rule nobody has a reason to break never produces findings and only takes up room. A record of
+   having actually broken it is the best answer.
+3. **Is it visible in a diff?** Can a reviewer holding only the principle's sentences and the diff judge it? What you
+   only know by running (performance, correctness of results) gets rewritten as a symptom that shows in a diff, or
+   dropped. "Same seed, same result" needs a run, but "do not change the order of random calls in existing steps" is
+   visible in a diff.
+4. **Did a person already decide it?** What people put in the repository and made others follow is theirs, even if
+   Claude wrote it down — CLAUDE.md, design docs, tests and docstrings that state invariants. Lines that record a
+   person's decision or answer ("maintainer's decision", "user's answer", or the label the repository itself uses) are
+   the strongest; say so in the evidence field. What is not a person's is **what this
+   investigation inferred from the code structure** — that is a question, not a principle. Put it in the table and add
+   it once the person answers. This file is not a place for Claude's design opinions.
 
-넷을 다 넘으면 원칙이다. 과거 교정 기록을 전부 덮는 가장 작은 집합이 알맞은 크기다. 근거도 사례도 없는 후보는
-빼거나 묻는다.
+A candidate that passes all four is a principle. The right size is the smallest set that covers all past correction
+records. Candidates with neither evidence nor cases are dropped or asked about.
 
-원칙이 아닌 것:
+Not principles:
 
-- 스타일·이름 규칙·포맷 — 린터의 일
-- 모드가 이미 보는 일반 규칙(위)
-- 바람("빨라야 한다", "깔끔해야 한다")
-- 화면 동작 사양("가운데 버튼은 이동", "편집에서 나가는 길은 셋") — 사람이 정했고 diff 에도 보이지만 어겨도 그
-  동작만 틀린다(국소). 사양 문서와 화면 검사의 일이다.
-- 절차("문서를 같이 고친다", "NAS 에서 확인한다"). 절차와 원칙의 경계는 이것이다 — **한쪽 diff 만 보고 다른 쪽이
-  빠졌다는 걸 리뷰어가 알 수 있는가.** "CLI 를 바꾸면 CLI.md 도"는 알 수 있으니 원칙이 되고, "작업 뒤 사용법 문서를
-  손본다"는 알 수 없으니 절차다.
-- 검사가 완전히 잡는 성질은 긴 규칙이 필요 없다 — 검사 이름과 불변식 한 줄이면 된다. 그래야 그 검사를 약화시키는
-  변경이 잡힌다. 검사만 있고 문서·기록이 없는 후보도, 검사 이름·docstring 이 불변식을 말하면 근거로 친다.
+- Style, naming rules, formatting — the linter's job
+- General rules the mode already checks (above)
+- Wishes ("must be fast", "must be clean")
+- UI behavior specs ("Save stays disabled until the form is valid", "there are three ways to close the dialog") —
+  people decided them and they show in a diff, but breaking one only breaks that behavior (local). That is the job of spec documents and UI
+  tests.
+- Procedures ("update the docs too", "verify on staging"). The line between procedure and principle is this — **can the
+  reviewer, seeing a diff that changes only one side, tell that the other side is missing?** "If you change the CLI, update CLI.md
+  too" can be told, so it is a principle; "touch up the usage docs after work" cannot, so it is a procedure.
+- A property a test fully catches doesn't need a long rule — the test name and a one-line invariant are enough. That
+  way a change that weakens the test gets caught. A candidate with only a test and no docs or records still counts as
+  evidence if the test name or docstring states the invariant.
 
-## 절차
+## Procedure
 
-### 0. 상황 파악
+### 0. Get your bearings
 
-- `git rev-parse --show-toplevel` 로 저장소 뿌리를 잡는다. 저장소가 아니면 멈춘다 — 모드는 git 저장소에서만 돈다.
-- `.claude/principles.md` 가 이미 있으면 **손보기**다(아래 절). 없으면 **처음 만들기**.
-- `.git/motive-mem/` 에 `reviews.jsonl`·`decisions.jsonl` 이 있으면 모드가 돌았던 저장소다. 손보기의 가장 좋은 증거다.
+- Find the repository root with `git rev-parse --show-toplevel`. If it is not a repository, stop — the mode only runs
+  in git repositories.
+- If `.claude/principles.md` already exists, this is a **revision** (section below). If not, **first creation**.
+- If `.git/motive-mem/` holds `reviews.jsonl` or `decisions.jsonl`, the mode has run here. Those are the best evidence
+  for a revision.
+- Pick the language — for the file and for the table in step 5: the one the people working in the repository use
+  (its CLAUDE.md and docs are a good guide). The mode reads field and section names in English or Korean; see
+  `references/format.md`.
 
-### 1. 증거 모으기
+### 1. Gather evidence
 
-네 종류를 찾고, 후보마다 어디서 왔는지를 같이 적어 둔다. 나중에 근거 칸이 된다.
+Look for four kinds, and note where each candidate came from. That becomes the evidence field later.
 
-**적힌 규칙** — CLAUDE.md, AGENTS.md, .cursorrules, CONTRIBUTING, ARCHITECTURE, docs/ 의 설계·요구사항 문서.
-"하지 않는다", "유일한", "한 곳", "~만", "never", "only", "must" 가 붙은 문장. 이런 문장은 대개 한 번 데인 뒤에 적힌 것이다.
+**Written rules** — CLAUDE.md, AGENTS.md, .cursorrules, CONTRIBUTING, ARCHITECTURE, design and requirement docs under
+docs/. Sentences with "never", "only", "must", "the one place", "do not" — or their equivalents in the repository's
+language (Korean: "하지 않는다", "유일한", "한 곳", "오직"). Such sentences were usually written after getting burned once.
 
-**교정 기록** — 가장 값진 증거. 사람이 "아니"라고 한 흔적이다. 있을 자리는 저장소마다 다르다.
+**Correction records** — the most valuable evidence: traces of a person saying "no". Where they live differs per
+repository.
 
-- 코드와 검사의 docstring·주석: "예전에는 ~했다", "~하던 적이 있다", "수정 전 실패", "실측", "되돌림", "뒤집음".
-  검사 머리에 "수정 전 실패 / 수정 후 통과"가 적혀 있으면 그 검사가 교정 기록 자체다.
-- 문서 안의 "~했다가 ~로 바꿨다", "~하지 말 것(과거에 ~)", 취소선, "교훈" 절, 작업 일지·진행 표의 보류·재작성.
-- 커밋: `git log --oneline -i --grep` 으로 revert·되돌림·원복·걷어냄·잘못·회귀·regress 를 찾되, 걸린 커밋의 diff 를
-  열어 정말 되돌린 것인지 본다 — 한국어 저장소에서는 "되돌리기" 기능, "걷어내기" 작업이 같이 걸린다. 커밋이
-  마일스톤 단위로 묶여 있으면 커밋 로그는 증거가 못 되니 위 둘로 간다.
+- Docstrings and comments of code and tests: "we used to …", "this once …", "fails before the fix", "measured",
+  "reverted", "overturned". If a test header says "fails before the fix / passes after", that test is itself a
+  correction record.
+- In documents: "we did X, then changed to Y", "don't do X (we did once)", strikethroughs, "lessons" sections, items
+  deferred or rewritten in work logs and progress tables.
+- Commits: search with `git log --oneline -i --grep` for revert, regress, rollback, wrong, undo (in a Korean repository
+  also 되돌림, 원복, 걷어냄, 잘못, 회귀), then open each hit's diff to see whether it really reverted something — an
+  app's "undo" feature or a "cleanup" task matches too. If commits are bundled per milestone, the commit log is no
+  evidence; go to the two above.
 
-교정 기록은 **접근**에 "아니"라고 한 것이다 — "그렇게 풀지 마라, 이 길로 가라". 그냥 고친 버그(404, 경쟁 조건, 식의
-오타)는 사례일 뿐 원칙의 근거가 아니다. 같은 모양의 버그가 되풀이됐을 때만 그 뒤에 원칙이 있다.
+A correction record says "no" to an **approach** — "don't solve it that way, go this way". A plain bug fix (a 404, a
+race, a typo in a formula) is a case, not evidence for a principle. Only when bugs of the same shape recur is there a
+principle behind them.
 
-**지키는 검사** — 불변식을 검사하는 테스트(`test_deps`, `test_*_contract`, AST 로 호출을 세는 검사 …). 검사가
-있다는 것은 그 성질이 한 번 깨진 적이 있다는 뜻일 때가 많다.
+**Guarding tests** — tests that check an invariant (`test_deps`, `test_*_contract`, tests that count calls through the
+AST …). A test existing often means the property broke once.
 
-**구조** — import 방향, 한 함수만 부르는 쓰기, 한 파일에만 있는 상수. `grep` 으로 지금 코드가 실제로 지키는지
-본다. 적힌 규칙이나 교정 기록이 없는 구조는 후보가 아니라 질문이다.
+**Structure** — import direction, writes that call only one function, constants that live in one file only. Check
+with `grep` that the code actually holds it now. Structure with no written rule or correction record behind it is a
+question, not a candidate.
 
-저장소가 크면 조사 에이전트에게 나눠 맡긴다. 맡길 때 "원칙을 지어 오라"가 아니라 "이런 종류의 문장과 기록을
-찾아 출처(파일:줄)와 함께 가져오라"고 한다. 가져온 검사 이름·함수 이름은 `grep` 으로 실재를 확인한다 — 에이전트는
-이름을 바꿔 말하고, 검사 이름은 신호 칸에 들어가 리뷰어가 그 이름으로 약화 여부를 본다.
+In a large repository, split the search among investigation agents. When delegating, don't say "come up with
+principles" but "find sentences and records of these kinds and bring them back with their source (file:line)".
+Confirm with `grep` that the test and function names they bring back exist — agents paraphrase names, and test names
+go into the signal field, where the reviewer uses that name to spot weakening.
 
-### 2. 거르기와 합치기
+### 2. Filter and merge
 
-위 네 조건으로 거른다. 그리고:
+Filter with the four tests above. Then:
 
-- 문서의 문장 하나가 원칙 하나가 아니다. 같은 불변식을 말하는 문장들을 원칙 하나로 모은다 — "쓰기 경로 하나"
-  아래에 진입점·변경 세트·revision 검사·"거부는 무쓰기"가 다 들어간다.
-- 원칙 하나 = 신호 한 가지. 같은 신호로 잡히는 항목이 여럿인 것("그 한 곳" 목록, 금지 import 목록)은 원칙
-  하나다 — 목록은 그 자리를 알려 주는 것이다. 신호가 다르면 다른 원칙이다 — 식·표의 두 번째 사본, 통로를 건너뛴
-  호출(`ui_event` 밖의 알림), 계산값을 저장 필드로 더하기는 "한 곳" 이야기로 묶이지만 diff 에서 다르게 보이니 셋이다.
-  범위 glob 이 스무 개쯤 되면 나눌 때다. 리뷰어가 ID 하나로 가리킬 수 있어야 한다.
-- 교정 기록이 있는데 어느 원칙에도 안 들어가는 사례가 남으면, 그 사례가 가리키는 원칙이 빠진 것이다.
+- One sentence in a document is not one principle. Gather sentences that state the same invariant into one principle
+  — under "one write path" go the entry point, the audit log, the state check and "a rejected request writes
+  nothing".
+- One principle = one kind of signal. Items caught by the same signal (a list of "the one place"s, a list of forbidden
+  imports) are one principle — the list tells where. Different signals are different principles — a second copy of a
+  formula or table, a call that skips the channel (a notification sent around the event bus), and adding a computed value as
+  a stored field all belong to the "one place" story but look different in a diff, so they are three. When scope globs
+  reach about twenty, it is time to split. The reviewer must be able to point at it with one ID.
+- If a correction record remains that fits no principle, the principle it points to is missing.
 
-### 3. 범위 재기
+### 3. Measure scope
 
-범위는 리뷰어에게 "이 파일을 바꿨으면 이 원칙을 볼 것"이라고 주는 힌트다. 거의 모든 파일에 걸리는 범위는
-아무것도 말하지 않는다. 모드가 glob 을 읽는 법대로 센다 — `**` 는 `.*`, `*` 는 `[^/]*`, 앞뒤에 `^`·`$`:
+Scope is a hint to the reviewer: "if this file changed, look at this principle". A scope that covers nearly every file
+says nothing. Count the way the mode reads globs — `**` and `**/` are `.*` (so `src/**/*.py` also matches files
+directly in `src/`), `*` is `[^/]*`, `?` is one character, anchored with `^` and `$`. Braces like `{a,b}` are not
+supported — list the globs separately.
 
 ```sh
-git ls-files | grep -cE '^app/core/.*$'          # app/core/**
-git ls-files | grep -cE '^app/[^/]*\.py$'        # app/*.py
+git ls-files | grep -cE '^src/core/.*$'          # src/core/**
+git ls-files | grep -cE '^src/.*\.py$'           # src/**/*.py
+git ls-files | grep -cE '^src/[^/]*\.py$'        # src/*.py
 ```
 
-원칙마다 센다. glob 이 여럿이면 합집합이고, 분모는 범위에 넣을 만한 파일 전부 — 소스와 데이터(`kinds.json`
-같은 표도 든다), 테스트·문서·바이너리는 뺀다. 절반 안팎을 넘으면 규칙이 실제로 물리는 곳으로 좁힌다 — "쓰기는
-commands.py 로"는 쓰기를 할 수 있는 곳(코어·CLI·브리지)에만 걸면 되고, "그 한 곳" 목록은 그 한 곳들 자체에 걸면
-된다(다른 데 생기는 사본은 모드의 땜질 검사가 본다). 좁힐 수 없는 전역 규칙(의존 방향)은 표에 그 비율을 적고 사람이
-둔다. 문서와의 짝은 범위가 아니라 규칙 문장에 적는다 — 문서만 바뀐 턴은 모드가 리뷰하지 않으니 문서를 범위에
-넣어도 얻는 게 없다.
+Count per principle. Several globs are a union; the denominator is every file that could reasonably be in scope —
+sources and data (tables like `rates.json` count), not tests, docs or binaries. Past about half, narrow it to where
+the rule actually bites — "writes go through commands.py" only needs to cover the places that can write (core, CLI,
+API handlers), and a list of "the one place"s only needs to cover those places themselves (copies made elsewhere are caught
+by the mode's band-aid check). Global rules that can't be narrowed (dependency direction) get their ratio written in
+the table, and the person decides. Pairing with documents goes in the rule sentence, not the scope — the mode does not
+review turns that changed only docs, so putting docs in scope gains nothing.
 
-### 4. 지금 코드와 대조
+### 4. Check against the current code
 
-원칙마다 신호(diff 에서 위반이 어떻게 보이는가)를 정하고, 그 신호를 지금 코드에 grep 한다. 걸리는 곳이 있으면
-셋 중 하나다:
+For each principle, decide its signal (how a violation shows in a diff) and grep the current code for it. Any hit is
+one of three:
 
-- 문서가 이미 예외라고 한 것 → 허용된 예외 `Exx` 로 적는다. 적지 않으면 리뷰어가 그 자리를 건드리는 모든 변경을 지적한다.
-- 문서가 말한 예외보다 코드의 예외가 많은 것(문서는 "둘뿐", 코드는 셋) → 추측해서 예외로 올리지 않는다. 열린
-  질문으로 올리고 문서가 낡았다고 사람에게 말한다. 예외로 적으면 리뷰어가 그 자리를 영영 안 보지만, 질문으로
-  두면 그 자리를 건드리는 diff 가 지적되고 사람이 패널에서 "예외 승인"으로 답한다 — 모드가 그 흐름을 위해 있다.
-- 아무도 모르던 위반 → 원칙이 실제로는 지켜지지 않는 것이다. 사람에게 묻는다(원칙을 고칠지, 코드를 고칠지).
+- Something the docs (or a docstring or comment at that spot) already call an exception → write it as an allowed exception `Exx`. If you don't, the reviewer
+  flags every change that touches that spot.
+- The code has more exceptions than the docs name (the docs say "only two", the code has three) → don't promote it to
+  an exception on a guess. Raise it as an open question and tell the person the docs are stale. An exception makes the
+  reviewer never look at that spot again; as a question, a diff touching it gets flagged and the person answers with
+  "approve as exception" in the panel — that is the flow the mode is built for.
+- A violation nobody knew about → the principle is not actually held. Ask the person (fix the principle, or fix the
+  code); until they answer, it is an open question.
 
-문서끼리 어긋나면(CLAUDE.md 는 "한 곳에만", 사본 쪽 주석은 "일부러 같은 값") 어느 쪽도 고르지 않고 열린 질문이다.
-짝 규칙("X 를 바꾸면 Y 도")은 지금 코드에 신호가 없으니 이 단계를 건너뛴다.
+When documents disagree (CLAUDE.md says "only in one place", a comment by the copy says "deliberately the same
+value"), pick neither — it is an open question. Paired rules ("if you change X, change Y") have no signal in the current
+code, so skip this step for them.
 
-### 5. 사람에게 보이기 — 아직 쓰지 않는다
+### 5. Show the person — don't write yet
 
-표 하나로 보인다. 줄마다 ID · 한 줄 규칙 · 근거 종류(작가 결정 / 문서 / 사례 / 검사 / 구조 추정 — 하나 이상) ·
-범위 파일 수 · 열린 질문. 뺀 후보도 짧게 보인다("스타일이라 뺌", "모드가 이미 봄"). 사람이 줄을 지우거나 고치거나
-질문에 답하기를 기다린다. 원칙은 사람의 것이다 — 이 단계를 건너뛰면 Claude 의 추정이 원칙이 된다. 표의 질문
-칸에서 답이 안 난 것이 그대로 파일의 `## 열린 질문` 절이 된다.
+Show one table. Per row: ID · one-line rule · kinds of evidence (a person's decision / document / past case / test /
+inferred from structure — one or more) · files in scope (count and share) · open questions. Show dropped candidates briefly too
+("dropped: style", "dropped: the mode already checks it"). Wait for the person to delete or edit rows or answer the
+questions. The principles are the person's — skip this step and Claude's guesses become principles. Whatever the
+question column leaves unanswered becomes the file's `## Open questions` section as is.
 
-### 6. 쓰기
+### 6. Write
 
-`references/format.md` 의 형식으로 `.claude/principles.md` 를 쓴다. 모드는 `## P01 제목`과 `- 범위:` 를 기계로
-읽고, `## 열린 질문` 절은 리뷰어에게 주기 전에 걷어내며, 나머지는 글 그대로 리뷰어에게 준다 — 사람이 읽기 좋게
-쓰면 리뷰어도 잘 읽는다. 사람이 아직 답하지 않은 것은 원칙·예외 줄에 "(확인 필요)"를 달아 두지 말고 `## 열린
-질문` 으로 옮긴다 — 원칙 줄은 리뷰어가 기준으로 삼고 예외 줄은 리뷰어를 침묵시키니, 둘 다 답이 난 것만 둔다.
-질문이 붙은 원칙은 원칙은 그대로 두고 질문만 옮긴다. 원칙·예외 본문에서 Q 번호를 가리키지 않는다 — 그 절은
-걷어내지므로 리뷰어에게는 가리킬 곳이 없다.
+Write `.claude/principles.md` in the format of `references/format.md`. The mode machine-reads `## P01 Title` and
+`- Scope:`, cuts the `## Open questions` section before the file goes to the reviewer, and gives everything else to
+the reviewer as written — write it for people to read and the reviewer reads it well too. (Korean names work the same;
+see the format.) Anything the person hasn't answered yet doesn't get a "(needs confirmation)" tag on a principle or
+exception line — move it to `## Open questions`. Principle lines are the reviewer's criteria and exception lines
+silence it, so both hold only answered things. For a principle with a question attached, keep the principle and move
+just the question. Don't refer to Q numbers in principle or exception text — that section is cut, so the reviewer has
+nothing to look up.
 
-이 글은 리뷰마다 통째로 모델에 들어간다. 근거는 가장 센 것 두셋, 지키는 검사는 대표 몇 개면 된다.
+This text goes into the model whole on every review. The two or three strongest pieces of evidence and a few
+representative guarding tests are enough.
 
-### 7. 마무리
+### 7. Wrap up
 
-알려 줄 것:
+Tell the person:
 
-- 이 저장소에서 다음 세션부터 모드가 켜진다(파일이 있으면 켜진다). 지금 바로 보려면 `/motive-mem all`.
-- 틀린 지적은 패널의 "예외 승인"으로 — `decisions.jsonl` 에 남고 다음 리뷰부터 안 짚는다. 같은 예외가 쌓이면 이
-  스킬로 돌아와 `Exx` 로 올리거나 범위를 좁힌다.
-- 커밋은 사람이 한다.
+- The mode turns on in this repository from the next session (it turns on when the file exists). To see it right
+  away: `/motive-mem all`.
+- Wrong findings go through "approve as exception" in the panel — they land in `decisions.jsonl` and are not raised
+  again. When the same exception piles up, come back to this skill to promote it to an `Exx` or narrow the scope.
+- The person commits.
 
-## 손보기 (파일이 이미 있을 때)
+## Revising (when the file already exists)
 
-고쳐 쓰지 않는다. 있는 원칙은 사람이 확정한 것이다. 증거를 모아 **바꿀 줄만** 제안한다.
+Don't rewrite it. The existing principles are ones the person confirmed. Gather evidence and propose **only the lines
+to change**.
 
-모드 기록이 가장 좋은 증거다(`.git/motive-mem/`, 한 줄에 JSON 하나):
+The mode's logs are the best evidence (`.git/motive-mem/`, one JSON object per line):
 
-- `decisions.jsonl` — 사람이 예외로 승인한 지적 `{principle, file, why}`. 같은 원칙에 예외가 쌓이면 범위가
-  넓거나, 예외 `Exx` 가 빠졌거나, 규칙 문장이 실제보다 세다. 좁히거나 예외를 올린다.
-- `reviews.jsonl` — 리뷰마다 `verdict.findings[].principle` 과 `excepted`(예외 처리된 지적의 번호). 지적됐는데
-  예외 처리되지 않은 원칙은 실제로 물린 원칙이다 — 그대로 둔다. 한 번도 지적이 안 나온 원칙은 그냥 안 건드린
-  것일 수 있다 — 그것만으로 빼지 않는다.
-- `## 열린 질문` 에 남은 것 — 그동안 답이 났는지 묻는다.
-- 원칙 파일이 마지막으로 바뀐 뒤의 교정 기록(`git log --since` 또는 그 커밋 이후) — 새 원칙의 후보.
+- `decisions.jsonl` — findings the person approved as exceptions, `{principle, file, why}`. Exceptions piling up on one
+  principle mean the scope is too wide, an exception `Exx` is missing, or the rule sentence is stronger than reality.
+  Narrow it or add the exception.
+- `reviews.jsonl` — per review, `verdict.findings[].principle` and `excepted` (the numbers of findings made
+  exceptions). A principle that was flagged and not made an exception is one that actually bit — leave it. A principle
+  that never produced a finding may just not have been touched — that alone is no reason to drop it.
+- What remains in `## Open questions` — ask whether they have been answered since.
+- Correction records since the principles file last changed (`git log --since`, or after that commit) — candidates
+  for new principles.
 
-제안은 "좁힌다 · 예외를 올린다 · 뺀다"가 먼저고 "더한다"는 근거가 있을 때만. 표로 보이고 사람이 고르면 그 줄만 고친다.
+Propose "narrow · add an exception · drop" first, and "add" only with evidence. Show a table; when the person picks,
+change only those lines.
 
-## 자료가 거의 없는 저장소
+## A repository with little to go on
 
-적힌 규칙도 교정 기록도 없으면(새 저장소, 짧은 git 이력) 캐내지 말고 묻는다. 세 질문이면 된다:
+If there are no written rules and no correction records (a new repository, a short git history), don't dig — ask.
+Three questions are enough:
 
-1. 서로 몰라야 하는 층·모듈이 있는가(의존 방향).
-2. 모든 변경이 지나야 하는 한 길이 있는가(쓰기·이벤트·설정).
-3. 한 번 깨져서 고생한 것이 있는가 — 사람이든 AI 든.
+1. Are there layers or modules that must not know about each other (dependency direction)?
+2. Is there one path every change must go through (writes, events, config)?
+3. Is there something that broke once and cost you — whether a person or an AI broke it?
 
-답에서 나온 것만 적고, 범위를 좁게 두고, 모드가 돌면서 쌓이는 기록으로 손본다.
+Write only what comes out of the answers, keep scopes narrow, and revise with the logs the mode builds up as it runs.

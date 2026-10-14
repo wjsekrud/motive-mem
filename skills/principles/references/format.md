@@ -1,70 +1,89 @@
-# principles.md 형식
+# principles.md format
 
-```markdown
-# 대원칙 (의도 리뷰용)
+Write the file in the language its people use. The mode reads field and section names in English or Korean only:
+use the Korean set for a Korean file and the English set for any other language. The title, the preamble and the
+words in parentheses after a section name are free text — write them in the file's language.
 
-<머리말 2~4줄 — 리뷰어는 여기 적힌 것만 기준으로 삼는다. 원칙은 사람만 더하고 고친다. 출처 문서 이름.>
-
-## P01 <원칙을 한 문장으로 — 제목만 읽어도 뜻이 통하게>
-- 범위: <저장소 뿌리 기준 glob, 쉼표로 여럿>
-- 규칙: <무엇을 한다/하지 않는다. 어기면 무엇이 깨지는지 한 문장.>
-- 신호: <diff 에서 위반이 어떻게 보이는가 — 함수 이름·import·패턴처럼 구체적으로. 지키는 검사가 있으면 이름.>
-- 근거: <출처 문서와 절 / 과거 사례(파일:줄 · 커밋 · 날짜). 작가가 직접 정한 것이면 "작가 결정"이라 적는다.>
-
-## 허용된 예외 (위반으로 보지 않는다)
-- E01 <어디서 무엇이 왜 허용되는가> — P03
-
-## 이 저장소에서 반복된 땜질 (리뷰어 참고)
-- <사례 한 줄> → Pxx
-
-## 열린 질문 (사람이 답하면 원칙이나 예외가 된다 — 리뷰어에게는 가지 않는다)
-- Q01 <무엇이 어긋나는가, 어디서 봤는가, 어느 쪽이 맞는지>
-```
-
-## 모드가 기계로 읽는 것
-
-- `## P01 제목` — 제목 줄의 `[A-Z]` 한 글자 + 숫자 1~3자리가 ID 다. `## 허용된 예외`처럼 ID 가 없는 제목은 원칙으로
-  읽지 않고, 그 아래 줄은 어느 원칙에도 붙지 않는다.
-- `- 범위:` — 쉼표로 나눈 glob. `**` 는 폴더를 건너고 `*` 는 한 칸 안에서만. 바뀐 파일이 어느 원칙 범위에 드는지
-  이 칸으로만 센다.
-- `## 열린 질문` · `## 확인 필요` 로 시작하는 절은 리뷰어에게 주기 전에 걷어낸다. 그 밖의 글은 전부 그대로 리뷰어에게 간다.
-
-## 칸마다
-
-- **범위** — 경계가 아니라 힌트다. 리뷰어는 어차피 원칙 전체를 받는다. 너무 넓으면 힌트가 없는 것과 같다. 파일
-  수를 세어 본다. 코드 파일만 — 문서와의 짝은 규칙 문장에 적는다.
-- **규칙** — 현재형, 구체적인 이름. "어기면 무엇이 깨지는지"를 한 문장 붙인다 — 리뷰어는 그걸로 경계 사례를
-  판단하고, 사람은 그걸로 예외를 줄지 정한다.
-- **신호** — 리뷰어에게 가장 쓸모 있는 칸. `+` 줄에 어떤 글자가 보이면 위반을 의심할지. 지키는 검사의 이름을
-  적어 두면 그 검사를 약화시키는 변경도 잡힌다.
-- **근거** — 출처. 줄 번호는 곧 밀리니 `grep` 되는 짧은 인용구를 같이 적는다. 근거가 "구조에서 추정"뿐이면 아직
-  이 파일에 있으면 안 된다 — 열린 질문으로.
-- **예외(E)** — 리뷰어를 침묵시키는 줄이다. 답이 난 것만 적는다. 확실하지 않으면 열린 질문으로. 끝의 `— P03` 은
-  글이다(기계로 읽지 않는다) — 둘에 걸치면 `— P03 · P08`.
-- 원칙·예외 본문에서 `Q01` 같은 열린 질문 번호를 가리키지 않는다 — 리뷰어는 그 절을 받지 않는다.
-
-## 예 — 원칙인 것
-
-가상의 저장소(주문 처리 서비스)다. 이 예를 베끼지 말고 모양만 본다.
-
-```markdown
-## P02 주문 상태는 orders/transitions.py 한 곳에서만 바뀐다
-- 범위: orders/**, api/handlers/**, jobs/**
-- 규칙: `Order.status` 는 `transitions.apply(order, event)` 만 바꾼다 — 상태표 검사·감사 기록·웹훅 발송이 거기
-  붙어 있다. 건너뛰면 기록 없는 상태 변화가 생기고 환불 작업이 잘못된 상태를 본다.
-- 신호: `transitions.py` 밖의 `order.status =` · `UPDATE orders SET status`; `apply()` 를 지나지 않는 `save()`;
-  `tests/test_transitions.py::test_status_only_changes_through_apply`(AST 로 대입 자리를 센다)를 느슨하게 하는 변경.
-- 근거: ARCHITECTURE.md "상태 전이" / 2026-03 "취소 지연" 핫픽스가 핸들러에서 직접 `status = CANCELLED` 로 써
-  환불이 두 번 나감 — 되돌림(커밋 4f2a9c1), 검사 추가. 작가 결정: "지름길 금지, 느리면 apply 를 빠르게".
-```
-
-## 예 — 원칙이 아닌 것
-
-| 후보 | 왜 아닌가 | 대신 |
+| English | 한국어 | Machine-read |
 | --- | --- | --- |
-| 함수는 30줄을 넘지 않는다 | 국소적 — 그 줄만 보기 싫어진다 | 린터 |
-| 테스트 기대값을 바꿔 통과시키지 않는다 | 모드가 이미 본다 | 적지 않는다 |
-| 주문 조회가 느려지면 안 된다 | diff 에서 안 보인다 | "조회 경로에 주문 단위 N+1 질의를 넣지 않는다"로 바꾸면 보인다 |
-| 핸들러는 깨끗해야 한다 | 바람 | 깨끗함이 무엇인지 — "핸들러는 DB 세션을 직접 열지 않는다"가 원칙이다 |
-| 배포 뒤 운영 문서를 손본다 | 절차 — 한쪽 diff 로 다른 쪽이 빠진 걸 알 수 없다 | 적지 않는다 |
-| 이 모듈은 아무도 import 하지 않는 것 같다 | 구조에서 추정 | 열린 질문 |
+| `- Scope:` | `- 범위:` | yes — globs |
+| `- Rule:` | `- 규칙:` | no |
+| `- Signal:` | `- 신호:` | no |
+| `- Evidence:` | `- 근거:` | no |
+| `## Allowed exceptions` | `## 허용된 예외` | no |
+| `## Recurring band-aids in this repository` | `## 이 저장소에서 반복된 땜질` | no |
+| `## Open questions` | `## 열린 질문` | yes — cut before review |
+
+```markdown
+# Principles (for intent review)
+
+<2–4 line preamble — the reviewer judges only by what is written here. Only people add or change principles. The names of the source docs.>
+
+## P01 <the principle in one sentence — the title alone should carry the meaning>
+- Scope: <globs from the repository root, comma-separated>
+- Rule: <what to do / not do. One sentence on what breaks if it's broken.>
+- Signal: <how a violation shows in a diff — function names, imports, patterns, concretely. Names of guarding tests, if any.>
+- Evidence: <source doc and section / past cases (file:line · commit · date). If a person decided it directly, say so — "maintainer's decision", or the label the repository itself uses.>
+
+## Allowed exceptions (not violations)
+- E01 <where, what is allowed, and why> — P03
+
+## Recurring band-aids in this repository (optional — only what the records show more than once)
+- <one-line case> → Pxx
+
+## Open questions (become principles or exceptions once a person answers — not given to the reviewer)
+- Q01 <what disagrees, where you saw it, which side might be right>
+```
+
+## What the mode machine-reads
+
+- `## P01 Title` — the ID is one `[A-Z]` letter plus 1–3 digits in the heading. Headings without an ID, like
+  `## Allowed exceptions`, are not read as principles, and the lines under them attach to no principle.
+- `- Scope:` (or `- 범위:`) — comma-separated globs. `**` crosses folders, `*` stays within one. Which principle's scope
+  a changed file falls in is counted from this field alone.
+- Sections whose heading starts with `## Open questions` or `## Needs confirmation` (`## 열린 질문`, `## 확인 필요`)
+  are cut before the file goes to the reviewer. All other text goes to the reviewer as is.
+
+## Field by field
+
+- **Scope** — a hint, not a boundary. The reviewer gets the whole file anyway. Too wide is the same as no hint — count
+  the files. Code files only; pairing with docs goes in the rule sentence. `dir/**/*.py` also matches files directly
+  in `dir/`; braces like `{a,b}` are not supported.
+- **Rule** — present tense, concrete names. Add one sentence on what breaks if it's broken — the reviewer judges
+  borderline cases by it, and the person decides by it whether to grant an exception.
+- **Signal** — the most useful field for the reviewer: what text on a `+` line should make it suspect a violation.
+  Naming the guarding test catches changes that weaken that test too.
+- **Evidence** — the source. Line numbers soon drift, so add a short greppable quote. If the only evidence is
+  "inferred from structure", it doesn't belong in this file yet — make it an open question.
+- **Exceptions (E)** — lines that silence the reviewer. Write only answered things; if unsure, an open question. The
+  trailing `— P03` is text (not machine-read) — when it spans two, `— P03 · P08`.
+- Don't refer to open question numbers like `Q01` in principle or exception text — the reviewer doesn't get that
+  section.
+
+## Example — a principle
+
+A made-up repository (an order processing service). Don't copy it; look at its shape.
+
+```markdown
+## P02 Order status changes only in orders/transitions.py
+- Scope: orders/**, api/handlers/**, jobs/**
+- Rule: only `transitions.apply(order, event)` changes `Order.status` — the state table check, the audit log and the
+  webhook dispatch hang off it. Skipping it produces unlogged status changes, and the refund job sees the wrong state.
+- Signal: `order.status =` or `UPDATE orders SET status` outside `transitions.py`; a `save()` that doesn't go through
+  `apply()`; a change that loosens `tests/test_transitions.py::test_status_only_changes_through_apply` (counts
+  assignment sites through the AST).
+- Evidence: ARCHITECTURE.md "State transitions" / the 2026-03 "cancel delay" hotfix wrote `status = CANCELLED`
+  directly in a handler and refunds went out twice — reverted (commit 4f2a9c1), test added. Maintainer's decision: "no
+  shortcuts; if it's slow, make apply fast".
+```
+
+## Example — not principles
+
+| Candidate | Why not | Instead |
+| --- | --- | --- |
+| Functions stay under 30 lines | Local — only makes those lines unpleasant | a linter |
+| Don't change test expectations to make them pass | The mode already checks it | don't write it |
+| Order lookup must not get slower | Not visible in a diff | "no per-order N+1 queries on the lookup path" is visible |
+| Handlers must be clean | A wish | say what clean means — "handlers don't open DB sessions directly" is a principle |
+| Update the ops docs after a deploy | A procedure — one side's diff can't show the other side is missing | don't write it |
+| Nobody seems to import this module | Inferred from structure | an open question |

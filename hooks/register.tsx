@@ -1,6 +1,8 @@
-// 의도 리뷰: 턴이 끝나면 그 턴에 바뀐 것을 저장소의 .claude/principles.md 에 비춰 다른 모델이 따로 본다.
-// 작성자(Claude)의 추론은 넘기지 않고 요청 · 보고 · diff · 원칙만 준다. 결과는 상태 줄 · 토스트 · 패널.
-// 턴의 시작과 끝을 `git stash create` 로 찍어(작업 트리를 건드리지 않는다) 그 사이 diff 만 본다.
+// Intent review: when a turn ends, a separate model checks what that turn changed against the repository's
+// .claude/principles.md. It gets the request, the report, the diff and the principles — never the author's
+// (Claude's) reasoning. Results go to the status line, a toast and a panel.
+// The start and end of a turn are snapshotted with `git stash create` (the working tree is never touched),
+// and only the diff between them is reviewed.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -9,7 +11,6 @@ import type { Decision, FileChange, Intent, Review } from '../types'
 import {
   BINARY,
   PRINCIPLES_PATH,
-  SYSTEM,
   buildPrompt,
   fixPrompt,
   hasIssues,
@@ -18,18 +19,20 @@ import {
   parseDiff,
   parsePrinciples,
   parseVerdict,
+  principleLabel,
   reviewMarkdown,
   scopeHits,
   statusLine,
+  systemPrompt,
   untrackedChunk,
 } from './core'
+import { WORDS, langOf, type Lang } from './text'
 
 type Engine = EngineInterface
 type Repo = { top: string; gitDir: string }
 type Snap = { rev: string; untracked: string[] }
 
 const PANE = 'motive-mem'
-const TITLE = '의도 리뷰'
 const KEEP = 40
 const FRESH_LIMIT = 30
 const FRESH_MAX_CHARS = 200_000
@@ -54,18 +57,17 @@ async function gitRepo($: Engine): Promise<Repo | undefined> {
   return top && gitDir ? { top, gitDir } : undefined
 }
 
-// 모드가 켜지는 조건: git 저장소이고 원칙 파일이 있다
+// When the mode is on: a git repository that has a principles file
 async function repoOf($: Engine): Promise<Repo | undefined> {
   const repo = await gitRepo($)
   if (repo === undefined) return undefined
   return (await $.fs.exists(`${repo.top}/${PRINCIPLES_PATH}`)) ? repo : undefined
 }
 
-// 왜 쉬고 있는지 — 명령으로 불렀을 때 안내
+// Why it is idle — the answer when a command is run
 async function whyOff($: Engine): Promise<string> {
-  return (await gitRepo($)) === undefined
-    ? 'git 저장소가 아니라 의도 리뷰가 쉬고 있습니다.'
-    : `${PRINCIPLES_PATH} 가 없어 의도 리뷰가 쉬고 있습니다. 원칙 파일을 만들려면 /motive-mem:principles`
+  const c = words().command
+  return (await gitRepo($)) === undefined ? c.notRepo : c.noPrinciples(PRINCIPLES_PATH)
 }
 
 async function snapshot($: Engine, repo: Repo): Promise<Snap | undefined> {
@@ -105,7 +107,7 @@ async function changes(
   return { files, diff }
 }
 
-// ---- 기록 (.git/motive-mem — 저장소 파일이 아니라 다음 턴 diff 에 끼지 않는다)
+// ---- logs (.git/motive-mem — outside the work tree, so they never show up in the next turn's diff)
 
 async function readLines<T>($: Engine, path: string, limit: number): Promise<T[]> {
   const text = await $.fs.read(path).catch(() => '')
@@ -131,7 +133,7 @@ async function appendLine($: Engine, path: string, value: unknown, keep: number)
 const reviewLog = (repo: Repo) => `${repo.gitDir}/motive-mem/reviews.jsonl`
 const decisionLog = (repo: Repo) => `${repo.gitDir}/motive-mem/decisions.jsonl`
 
-// ---- 상태
+// ---- state
 
 async function put($: Engine, review: Review) {
   await update($, reviews, list => [...list.filter(r => r.id !== review.id), review].slice(-KEEP))
@@ -142,14 +144,24 @@ async function replace($: Engine, review: Review) {
   await update($, reviews, list => list.map(r => (r.id === review.id ? review : r)))
 }
 
-// ---- 리뷰 (모듈 변수는 다시 불러오면 처음부터 — 리뷰 목록은 $.state 에 있다)
+// ---- review (module variables start over on reload — the review list lives in $.state)
 
-type Config = { model: string; effort: 'low' | 'medium' | 'high'; maxDiffChars: number; openOnIssue: boolean }
+type Config = {
+  model: string
+  effort: 'low' | 'medium' | 'high'
+  maxDiffChars: number
+  openOnIssue: boolean
+  lang: Lang
+}
 
-let config: Config = { model: 'sonnet', effort: 'medium', maxDiffChars: 60_000, openOnIssue: true }
+let config: Config = { model: 'sonnet', effort: 'medium', maxDiffChars: 60_000, openOnIssue: true, lang: 'en' }
 let pending: { repo: Repo; snap: Snap } | undefined
 let prompts: string[] = []
 let serial = 0
+
+function words() {
+  return WORDS[config.lang]
+}
 
 async function review(
   $: Engine,
@@ -160,7 +172,7 @@ async function review(
 ) {
   const { files, diff } = await changes($, repo, range.from, range.to, range.fresh)
   if (files.length === 0) {
-    if (origin !== 'turn') $.ui.toast('검토할 변경이 없습니다.')
+    if (origin !== 'turn') $.ui.toast(words().command.nothing)
     return
   }
   const principlesText = await $.fs.read(`${repo.top}/${PRINCIPLES_PATH}`)
@@ -185,9 +197,9 @@ async function review(
     excepted: [],
   }
   await put($, draft)
-  $.ui.status(statusLine(draft))
+  $.ui.status(statusLine(draft, config.lang))
   if (draft.principleDocs.length > 0) {
-    $.ui.toast(`원칙 문서가 바뀌었습니다: ${draft.principleDocs.join(', ')}`)
+    $.ui.toast(words().docsChangedToast(draft.principleDocs.join(', ')))
   }
   if (draft.status === 'skipped') {
     await appendLine($, reviewLog(repo), draft, 500)
@@ -198,8 +210,17 @@ async function review(
   const answer = await $.model.complete({
     model: config.model,
     effort: config.effort,
-    system: SYSTEM,
-    prompt: buildPrompt({ principles: principlesText, decisions, intent, files, diff, hits, maxDiffChars: config.maxDiffChars }),
+    system: systemPrompt(config.lang),
+    prompt: buildPrompt({
+      principles: principlesText,
+      decisions,
+      intent,
+      files,
+      diff,
+      hits,
+      maxDiffChars: config.maxDiffChars,
+      lang: config.lang,
+    }),
     maxTokens: 4000,
     timeoutMs: 240_000,
   })
@@ -210,16 +231,19 @@ async function review(
     const verdict = parseVerdict(answer.text)
     done =
       verdict === undefined
-        ? { ...draft, status: 'error', error: `답을 읽지 못함: ${answer.text.slice(0, 120)}` }
+        ? { ...draft, status: 'error', error: words().unreadable(answer.text.slice(0, 120)) }
         : { ...draft, status: 'done', verdict }
   }
   await replace($, done)
-  $.ui.status(statusLine(done))
+  $.ui.status(statusLine(done, config.lang))
   await appendLine($, reviewLog(repo), done, 500)
   if (hasIssues(done)) {
     const first = openFindings(done)[0]?.finding
-    $.ui.toast(first ? `${first.principle}: ${first.why}` : statusLine(done), { timeoutMs: 8000 })
-    if (config.openOnIssue) void $.ui.open({ id: PANE, title: TITLE })
+    $.ui.toast(
+      first ? `${principleLabel(first.principle, config.lang)}: ${first.why}` : statusLine(done, config.lang),
+      { timeoutMs: 8000 },
+    )
+    if (config.openOnIssue) void $.ui.open({ id: PANE, title: words().title })
   }
 }
 
@@ -234,10 +258,10 @@ async function reviewAll($: Engine) {
   if (repo === undefined) return whyOff($)
   const head = await git($, repo.top, ['rev-parse', 'HEAD'])
   const now = await snapshot($, repo)
-  if (head.exitCode !== 0 || now === undefined) return 'HEAD 를 읽지 못했습니다.'
+  if (head.exitCode !== 0 || now === undefined) return words().command.noHead
   const range = { from: head.stdout.trim(), to: now.rev, fresh: now.untracked }
   later($, () => review($, repo, range, { prompts: [...prompts], answer: '' }, 'all'))
-  return '미커밋 변경 전체를 검토합니다. 끝나면 상태 줄과 패널에 나옵니다.'
+  return words().command.reviewingAll
 }
 
 export const register: Register = (on, options) => {
@@ -246,21 +270,21 @@ export const register: Register = (on, options) => {
     effort: String(options.effort ?? 'medium') as Config['effort'],
     maxDiffChars: Number(options.maxDiffChars ?? 60_000),
     openOnIssue: options.openOnIssue !== false,
+    lang: langOf(options.language),
   }
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({
-      name: 'motive-mem',
-      description: '의도 리뷰 패널 열기 · all: 미커밋 전체 검토 · pause / resume: 자동 리뷰 멈춤·재개',
-    })
+    await $.command.register({ name: 'motive-mem', description: words().command.description })
     const repo = await repoOf($)
     if (repo !== undefined && (await read($, reviews)).length === 0) {
       const saved = await readLines<Review>($, reviewLog(repo), KEEP)
       if (saved.length > 0) await update($, reviews, () => saved)
     }
     const last = (await read($, reviews)).at(-1)
-    if (repo !== undefined) $.ui.status(last ? statusLine(last) : '의도 리뷰 · 켜짐')
+    if (repo !== undefined) {
+      $.ui.status(last ? statusLine(last, config.lang) : `${words().title} · ${words().status.on}`)
+    }
     return started
   })
 
@@ -271,7 +295,7 @@ export const register: Register = (on, options) => {
         pending = undefined
       } else {
         if (e.text.trim() !== '') prompts = [...prompts, e.text.trim()].slice(-3)
-        // 멈춘(중단된) 턴의 시작점은 남겨 둔다 — 다음 턴 리뷰가 둘을 같이 본다
+        // Keep the start of a stopped (aborted) turn — the next turn's review covers both
         if (pending === undefined || pending.repo.top !== repo.top) {
           const snap = await snapshot($, repo).catch(() => undefined)
           pending = snap === undefined ? undefined : { repo, snap }
@@ -299,54 +323,57 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'motive-mem' }, async ($, e) => {
+    const w = words()
     const arg = e.args.trim()
     if (arg === 'pause') {
       await update($, isPaused, () => true)
       pending = undefined
-      $.ui.status('의도 리뷰 · 멈춤')
-      return { text: '자동 리뷰를 멈췄습니다. 다시 켜려면 /motive-mem resume' }
+      $.ui.status(`${w.title} · ${w.status.paused}`)
+      return { text: w.command.paused }
     }
     if (arg === 'resume') {
       await update($, isPaused, () => false)
-      $.ui.status('의도 리뷰 · 켜짐')
-      return { text: '자동 리뷰를 다시 켰습니다. 다음 턴부터 봅니다.' }
+      $.ui.status(`${w.title} · ${w.status.on}`)
+      return { text: w.command.resumed }
     }
     if (arg === 'all') return { text: await reviewAll($) }
     if ((await repoOf($)) === undefined) return { text: await whyOff($) }
-    await $.ui.open({ id: PANE, title: TITLE })
-    return { text: '의도 리뷰 패널을 열었습니다.' }
+    await $.ui.open({ id: PANE, title: w.title })
+    return { text: w.command.opened }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Button, Markdown, Text } = $.ui.resolve(e)
+    const w = words()
+    const p = w.panel
     const list = await read($, reviews)
     const paused = await read($, isPaused)
     if (list.length === 0) {
       return (
         <Box flexDirection="column">
-          <Text dimColor>아직 리뷰가 없습니다. 코드를 바꾼 턴이 끝나면 여기에 나옵니다.</Text>
-          {paused && <Text color="warning">자동 리뷰 멈춤 — /motive-mem resume</Text>}
-          <Button key="all" label="미커밋 전체 검토" hotkey="a" onPress={() => void reviewAll($)} />
+          <Text dimColor>{p.empty}</Text>
+          {paused && <Text color="warning">{p.pausedBanner}</Text>}
+          <Button key="all" label={p.reviewAll} hotkey="a" onPress={() => void reviewAll($)} />
         </Box>
       )
     }
     const at = await read($, cursor)
     const index = at < 0 || at >= list.length ? list.length - 1 : at
     const shown = list[index]
-    if (shown === undefined) return <Text dimColor>리뷰를 찾지 못했습니다.</Text>
+    if (shown === undefined) return <Text dimColor>{p.notFound}</Text>
     const open = openFindings(shown)
     const move = (step: number) =>
       update($, cursor, () => Math.min(list.length - 1, Math.max(0, index + step)))
 
     return (
       <Box flexDirection="column" gap={1}>
-        {paused && <Text color="warning">자동 리뷰 멈춤 — /motive-mem resume</Text>}
-        <Markdown text={reviewMarkdown(shown, index, list.length)} />
+        {paused && <Text color="warning">{p.pausedBanner}</Text>}
+        <Markdown text={reviewMarkdown(shown, index, list.length, config.lang)} />
         <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-          <Button key="prev" label="◀ 이전" hotkey="p" dimColor={index === 0} onPress={() => move(-1)} />
+          <Button key="prev" label={p.prev} hotkey="p" dimColor={index === 0} onPress={() => move(-1)} />
           <Button
             key="next"
-            label="다음 ▶"
+            label={p.next}
             hotkey="n"
             dimColor={index === list.length - 1}
             onPress={() => move(1)}
@@ -354,16 +381,16 @@ export const register: Register = (on, options) => {
           {hasIssues(shown) && (
             <Button
               key="send"
-              label="Claude에게 전달"
+              label={p.send}
               hotkey="c"
               variant="primary"
-              onPress={() => void $.prompt.fill({ text: fixPrompt(shown) })}
+              onPress={() => void $.prompt.fill({ text: fixPrompt(shown, config.lang) })}
             />
           )}
           {shown.status !== 'running' && shown.level !== 'trivial' && (
             <Button
               key="retry"
-              label="다시 검토"
+              label={p.retry}
               hotkey="r"
               onPress={() => {
                 later($, async () => {
@@ -373,15 +400,15 @@ export const register: Register = (on, options) => {
               }}
             />
           )}
-          <Button key="all" label="미커밋 전체" hotkey="a" onPress={() => void reviewAll($)} />
+          <Button key="all" label={p.uncommitted} hotkey="a" onPress={() => void reviewAll($)} />
         </Box>
         {open.length > 0 && (
           <Box flexDirection="column">
-            <Text dimColor>틀린 지적이면 예외로 승인 — 다음 리뷰부터 같은 건을 다시 짚지 않습니다.</Text>
+            <Text dimColor>{p.exceptHint}</Text>
             {open.slice(0, 9).map(({ finding, index: i }) => (
               <Button
                 key={`except:${shown.id}:${i}`}
-                label={`${i + 1}번 예외 승인 (${finding.principle} ${finding.file.split('/').pop()})`}
+                label={p.except(i + 1, principleLabel(finding.principle, config.lang), finding.file.split('/').pop() ?? '')}
                 hotkey={String(i + 1)}
                 dimColor
                 onPress={async () => {
@@ -396,7 +423,7 @@ export const register: Register = (on, options) => {
                   await appendLine($, decisionLog(repo), decision, 200)
                   const updated = { ...shown, excepted: [...shown.excepted, i] }
                   await replace($, updated)
-                  $.ui.status(statusLine(updated))
+                  $.ui.status(statusLine(updated, config.lang))
                 }}
               />
             ))}

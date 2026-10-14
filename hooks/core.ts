@@ -1,5 +1,5 @@
-// 의도 리뷰의 순수한 부분: 원칙 문서 읽기, diff 나누기, 리뷰 요청 만들기, 답 읽기, 패널 글.
-// `$` 를 쓰지 않으므로 claude plugin test 로 그대로 검사한다.
+// The pure part of intent review: reading the principles doc, splitting the diff, building the review
+// request, reading the answer, and the panel text. No `$` here, so `claude plugin test` checks it as is.
 
 import type {
   Decision,
@@ -12,6 +12,7 @@ import type {
   Review,
   Verdict,
 } from '../types'
+import { WORDS, type Lang } from './text'
 
 export const PRINCIPLES_PATH = '.claude/principles.md'
 
@@ -26,7 +27,10 @@ export function isPrincipleDoc(path: string): boolean {
   return path === PRINCIPLES_PATH || path === 'CLAUDE.md' || path.endsWith('/CLAUDE.md') || path === 'AGENTS.md'
 }
 
-// ---- 원칙 문서
+// ---- principles doc
+
+// The scope field, in either language the skill writes: `- Scope:` or `- 범위:`
+const SCOPE = /^\s*[-*]\s*(?:scope|범위)\s*:\s*(.+)$/i
 
 export function parsePrinciples(text: string): Principle[] {
   const out: Principle[] = []
@@ -42,7 +46,7 @@ export function parsePrinciples(text: string): Principle[] {
       current = undefined
       continue
     }
-    const scope = /^\s*[-*]\s*범위\s*:\s*(.+)$/.exec(line)
+    const scope = SCOPE.exec(line)
     if (scope && current) {
       current.scope.push(
         ...(scope[1] ?? '')
@@ -55,8 +59,9 @@ export function parsePrinciples(text: string): Principle[] {
   return out
 }
 
-// 사람끼리 답할 절 — 리뷰어에게는 주지 않는다 (답이 안 난 것이 기준이 되지 않게)
-const NOT_FOR_REVIEWER = /^##\s+(열린 질문|확인 필요)/
+// Sections for people to settle among themselves — kept from the reviewer so an unanswered question
+// never becomes a criterion
+const NOT_FOR_REVIEWER = /^##\s+(open questions|needs confirmation|열린 질문|확인 필요)/i
 
 export function forReviewer(text: string): string {
   const out: string[] = []
@@ -184,34 +189,45 @@ export function levelOf(files: { kind: FileKind }[]): Level {
   return 'trivial'
 }
 
-// ---- 리뷰 요청
+// ---- review request (in English whatever the language; only the answer's sentences follow `lang`)
 
-export const SYSTEM = `너는 이 저장소의 "의도 리뷰어"다. 한 줄씩 보는 코드 리뷰가 아니다. 사람 대신 판단하지 않는다 — 사람이 어디를 봐야 하는지 좁혀 준다.
+const ANSWER_LANGUAGE: Record<Lang, string> = { en: 'English', ko: 'Korean' }
 
-세 가지만 판단한다.
-1. 의도 일치 — diff 가 <요청> 과 <작성자 보고> 에 맞는가. 보고에 없는데 바뀐 것 가운데 요청 범위 밖이거나 다른 동작을 바꾸는 것만 "unstated" 에 넣는다 — 요청한 변경 안의 세부(값·별칭·문구·이름 고르기)는 넣지 않는다. unstated 가 하나라도 있으면 사람 앞에 패널이 열린다 — "큰 문제는 아니지만" 하고 덧붙일 것이라면 넣지 않는다. 보고가 실제보다 부풀려졌는지(검사 통과를 사용자 확인으로, 부분 충족을 완료로) 본다.
-2. 원칙 위반 — <원칙> 에 적힌 원칙만 기준이다. 원칙 문서에 없는 기준을 만들지 않는다. <원칙> 의 "허용된 예외" 와 <승인된 예외> 에 해당하면 위반이 아니다.
-3. 눈앞 땜질 — 국소 문제를 맞추려고 구조를 우회한 흔적: 단일 진입점을 건너뛴 쓰기·동기화, 이미 한 곳에 있는 판정·식·표의 두 번째 사본, 특정 경우만 고치는 분기, 예외를 삼켜 증상 숨기기, 테스트 기대값·스냅숏을 바꿔 통과시키기, 검사 건너뛰기(skip·xfail), 대기 시간 늘리기, 특정 과제 전용 플래그.
+// The `principle` a band-aid gets when no principle covers it. Older logs hold the Korean '땜질'.
+export const WORKAROUND = 'workaround'
 
-하지 않는 것:
-- 스타일·이름·성능 취향, 더 나은 설계 제안, 방어 코드나 검증을 더하라는 제안.
-- 가상의 우려("나중에 ~할 수도"). diff 에 근거가 있는 것만 말한다.
-- 확신이 없으면 "violation" 이 아니라 "suspect" 로 낮춘다. 근거가 되는 diff 줄을 못 대면 말하지 않는다.
-- 문제가 없으면 findings 와 unstated 를 비운다. 빈 결과가 정상이다.
-- "attention" 은 findings · unstated 가운데 사람이 직접 열어 봐야 할 곳만 고른다. 둘 다 비었으면 attention 도 비운다.
+export function systemPrompt(lang: Lang): string {
+  return `You are this repository's "intent reviewer". This is not a line-by-line code review. You do not decide in the human's place — you narrow down where the human should look.
 
-답은 JSON 하나만 낸다(코드 블록 표시 없이):
+Judge only three things.
+1. Intent match — does the diff match <request> and <author_report>? Of the changes the report does not mention, put in "unstated" only those outside the request's scope or that change other behavior — not details inside the requested change (choice of values, aliases, wording, names). Any entry in "unstated" opens a panel in front of the human — if you would add "not a big deal, but", leave it out. Check whether the report claims more than happened (passing checks presented as user confirmation, partial presented as done).
+2. Principle violations — only the principles written in <principles> count. Do not invent criteria the principles document does not state. Anything covered by the allowed exceptions in <principles> or by <approved_exceptions> is not a violation. A principle's scope is a hint of where it usually bites, not a boundary: a change outside it that does what the principle forbids still breaks it.
+3. Band-aid fixes — signs of routing around the structure to make a local problem go away: a write or sync that skips the single entry point, a second copy of a rule, formula or table that already lives in one place, a branch that fixes only one specific case, swallowing an exception to hide a symptom, changing test expectations or snapshots to make them pass, skipping checks (skip, xfail), lengthening waits, a flag for one particular task.
+
+What you do not do:
+- Style, naming or performance taste; proposals for a better design; suggestions to add defensive code or validation.
+- Hypothetical concerns ("this might … later"). Say only what the diff gives grounds for.
+- When unsure, lower "violation" to "suspect". If you cannot point to the diff line it rests on, do not say it.
+- When nothing is wrong, leave findings and unstated empty. An empty result is normal.
+- "attention" picks, from findings and unstated, only the places a human must open themselves. If both are empty, leave attention empty too.
+
+Answer with a single JSON object only (no code fence):
 {
-  "summary": "이 변경이 실제로 한 일 한 문장",
+  "summary": "one sentence on what this change actually did",
   "intent": "match" | "partial" | "mismatch",
-  "intent_note": "의도·보고와 다른 점 한두 문장 (일치면 빈 문자열)",
+  "intent_note": "one or two sentences on how it differs from the intent and the report (empty string if it matches)",
   "findings": [
-    {"principle": "P03", "severity": "violation" | "suspect", "file": "경로", "line": 123, "why": "어떤 원칙을 어떻게 어기는지 한 문장", "evidence": "근거가 된 diff 줄 그대로, 짧게"}
+    {"principle": "P03", "severity": "violation" | "suspect", "file": "path", "line": 123, "why": "one sentence: which principle it breaks and how", "evidence": "the diff line it rests on, verbatim, short"}
   ],
-  "unstated": ["보고에 없는데 바뀐 것 — 파일과 한 줄 설명"],
-  "attention": ["사람이 꼭 볼 곳 — 파일:줄 과 이유 (최대 3개)"]
+  "unstated": ["a change not in the report — the file and a one-line description"],
+  "attention": ["where the human must look — file:line and why (at most 3)"]
 }
-"line" 은 바뀐 뒤 파일의 줄 번호(@@ 의 + 쪽 기준)이고 모르면 뺀다. "principle" 은 원칙 ID 이고, 땜질인데 맞는 원칙이 없으면 "땜질" 이라 쓴다. 문장은 한국어로 쓴다.`
+"line" is the line number in the file after the change (the + side of @@); omit it if unknown. "principle" is the ID of the principle the finding breaks — use it whenever one applies, band-aids included; write "${WORKAROUND}" only for a band-aid that no principle covers. ${answerIn(lang)} Quote evidence as it appears in the diff.`
+}
+
+function answerIn(lang: Lang): string {
+  return `Write every sentence of the answer in ${ANSWER_LANGUAGE[lang]}, whatever language the request, report and principles are in.`
+}
 
 const KIND_ORDER: Record<FileKind, number> = {
   code: 0,
@@ -222,17 +238,17 @@ const KIND_ORDER: Record<FileKind, number> = {
   binary: 5,
 }
 
-const KIND_WORD: Record<FileKind, string> = {
-  code: '코드',
-  test: '테스트',
-  principles: '원칙 문서',
-  comment: '주석만',
-  docs: '문서',
-  binary: '바이너리',
+const KIND_NAME: Record<FileKind, string> = {
+  code: 'code',
+  test: 'test',
+  principles: 'principles doc',
+  comment: 'comments only',
+  docs: 'docs',
+  binary: 'binary',
 }
 
 function clip(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max)}\n…(${text.length - max}자 생략)`
+  return text.length <= max ? text : `${text.slice(0, max)}\n…(${text.length - max} chars cut)`
 }
 
 function chunksByPath(diff: string): Map<string, string> {
@@ -263,7 +279,7 @@ export function budgetDiff(files: FileChange[], diff: string, maxChars: number):
       left.push(`${file.path} (+${file.added} -${file.removed})`)
     }
   }
-  const tail = left.length > 0 ? `\n(분량 때문에 diff 를 뺀 파일: ${left.join(', ')})` : ''
+  const tail = left.length > 0 ? `\n(diff left out for length: ${left.join(', ')})` : ''
   return kept.join('') + tail
 }
 
@@ -275,15 +291,16 @@ export type ReviewInput = {
   diff: string
   hits: Record<string, string[]>
   maxDiffChars: number
+  lang: Lang
 }
 
 export function buildPrompt(input: ReviewInput): { text: string; cache?: true }[] {
   const prompts = input.intent.prompts.length
     ? input.intent.prompts.map((p, i) => `${i + 1}. ${clip(p, 2000)}`).join('\n')
-    : '(없음)'
+    : '(none)'
   const decisions = input.decisions.length
     ? input.decisions.map(d => `- ${d.principle} ${d.file}: ${d.why}`).join('\n')
-    : '(없음)'
+    : '(none)'
   const byFile = new Map<string, string[]>()
   for (const [id, paths] of Object.entries(input.hits)) {
     for (const path of paths) byFile.set(path, [...(byFile.get(path) ?? []), id])
@@ -291,24 +308,25 @@ export function buildPrompt(input: ReviewInput): { text: string; cache?: true }[
   const files = input.files
     .map(f => {
       const ids = byFile.get(f.path)
-      const scope = ids ? ` [원칙 범위: ${ids.join(', ')}]` : ''
-      return `- ${f.path} (${KIND_WORD[f.kind]}, ${f.status}, +${f.added} -${f.removed})${scope}`
+      const scope = ids ? ` [in scope of: ${ids.join(', ')}]` : ''
+      return `- ${f.path} (${KIND_NAME[f.kind]}, ${f.status}, +${f.added} -${f.removed})${scope}`
     })
     .join('\n')
   const rest = [
-    `<요청> (오래된 것부터, 마지막이 이번 작업)\n${prompts}\n</요청>`,
-    `<작성자 보고> (작업을 마치며 Claude 가 사람에게 한 말)\n${clip(input.intent.answer, 6000) || '(없음 — 미커밋 변경 전체 검토)'}\n</작성자 보고>`,
-    `<승인된 예외> (사람이 이미 예외로 승인함 — 같은 건은 다시 지적하지 않는다)\n${decisions}\n</승인된 예외>`,
-    `<바뀐 파일>\n${files}\n</바뀐 파일>`,
+    `<request> (oldest first; the last one is this task)\n${prompts}\n</request>`,
+    `<author_report> (what Claude told the human when it finished)\n${clip(input.intent.answer, 6000) || '(none — reviewing all uncommitted changes)'}\n</author_report>`,
+    `<approved_exceptions> (the human already approved these as exceptions — do not raise the same thing again)\n${decisions}\n</approved_exceptions>`,
+    `<changed_files>\n${files}\n</changed_files>`,
     `<diff>\n${budgetDiff(input.files, input.diff, input.maxDiffChars)}\n</diff>`,
+    answerIn(input.lang),
   ].join('\n\n')
   return [
-    { text: `<원칙>\n${forReviewer(input.principles)}\n</원칙>`, cache: true },
+    { text: `<principles>\n${forReviewer(input.principles)}\n</principles>`, cache: true },
     { text: rest },
   ]
 }
 
-// ---- 답 읽기
+// ---- reading the answer
 
 export function parseVerdict(text: string): Verdict | undefined {
   const start = text.indexOf('{')
@@ -332,7 +350,7 @@ export function parseVerdict(text: string): Verdict | undefined {
         const why = str(f.why)
         if (why === '') return []
         const finding: Finding = {
-          principle: str(f.principle) || '땜질',
+          principle: str(f.principle) || WORKAROUND,
           severity: f.severity === 'violation' ? 'violation' : 'suspect',
           file: str(f.file),
           why,
@@ -352,7 +370,7 @@ export function parseVerdict(text: string): Verdict | undefined {
   }
 }
 
-// ---- 패널·상태 줄·Claude 에게 넘길 글
+// ---- panel, status line, and the text handed back to Claude
 
 export function openFindings(review: Review): { finding: Finding; index: number }[] {
   return (review.verdict?.findings ?? [])
@@ -365,27 +383,35 @@ export function hasIssues(review: Review): boolean {
   return v !== undefined && (openFindings(review).length > 0 || v.unstated.length > 0 || v.intent !== 'match')
 }
 
-const INTENT_WORD = { match: '의도 일치', partial: '의도 일부 어긋남', mismatch: '의도와 다름' } as const
+export function principleLabel(id: string, lang: Lang): string {
+  return id === WORKAROUND || id === '땜질' ? WORDS[lang].workaround : id
+}
 
-export function statusLine(review: Review): string {
-  if (review.status === 'running') return '의도 리뷰 · 검토 중…'
-  if (review.status === 'error') return `의도 리뷰 · 실패: ${review.error ?? ''}`.slice(0, 120)
+function tag(finding: Finding, lang: Lang): string {
+  return `[${principleLabel(finding.principle, lang)} ${WORDS[lang].severity[finding.severity]}]`
+}
+
+export function statusLine(review: Review, lang: Lang): string {
+  const w = WORDS[lang]
+  const s = w.status
+  if (review.status === 'running') return `${w.title} · ${s.running}`
+  if (review.status === 'error') return `${w.title} · ${s.failed(review.error ?? '')}`.slice(0, 120)
   if (review.status === 'skipped') {
     return review.principleDocs.length > 0
-      ? `의도 리뷰 · 원칙 문서가 바뀜(${review.principleDocs.join(', ')}) — 확인 필요`
-      : '의도 리뷰 · 사소한 변경만(주석·문서)'
+      ? `${w.title} · ${s.docsChanged(review.principleDocs.join(', '))}`
+      : `${w.title} · ${s.trivial}`
   }
   const v = review.verdict
-  if (v === undefined) return '의도 리뷰'
+  if (v === undefined) return w.title
   const open = openFindings(review)
   const violations = open.filter(x => x.finding.severity === 'violation').length
   const suspects = open.length - violations
-  if (!hasIssues(review)) return `의도 리뷰 ✓ ${INTENT_WORD[v.intent]} · 지적 없음`
-  const parts: string[] = [INTENT_WORD[v.intent]]
-  if (violations > 0) parts.push(`위반 ${violations}`)
-  if (suspects > 0) parts.push(`의심 ${suspects}`)
-  if (v.unstated.length > 0) parts.push(`보고 밖 ${v.unstated.length}`)
-  return `의도 리뷰 ⚠ ${parts.join(' · ')} — /motive-mem`
+  if (!hasIssues(review)) return `${w.title} ✓ ${w.intent[v.intent]} · ${s.noFindings}`
+  const parts: string[] = [w.intent[v.intent]]
+  if (violations > 0) parts.push(s.violations(violations))
+  if (suspects > 0) parts.push(s.suspects(suspects))
+  if (v.unstated.length > 0) parts.push(s.unstated(v.unstated.length))
+  return `${w.title} ⚠ ${parts.join(' · ')} — /motive-mem`
 }
 
 function clock(at: number): string {
@@ -394,78 +420,76 @@ function clock(at: number): string {
   return `${two(d.getHours())}:${two(d.getMinutes())}`
 }
 
-const LEVEL_WORD: Record<Level, string> = { logic: '로직 변경', tests: '테스트만', trivial: '사소한 변경' }
-const ORIGIN_WORD = { turn: '턴', all: '미커밋 전체', retry: '다시 검토' } as const
-
 function where(f: Finding): string {
   return f.line === undefined ? f.file : `${f.file}:${f.line}`
 }
 
-export function reviewMarkdown(review: Review, index: number, count: number): string {
+export function reviewMarkdown(review: Review, index: number, count: number, lang: Lang): string {
+  const w = WORDS[lang]
+  const p = w.panel
   const out: string[] = []
   out.push(
-    `**${ORIGIN_WORD[review.origin]} 리뷰 ${index + 1}/${count}** · ${clock(review.at)} · ${LEVEL_WORD[review.level]} · ${review.model}`,
+    `**${p.header(w.origin[review.origin], index + 1, count)}** · ${clock(review.at)} · ${w.level[review.level]} · ${review.model}`,
   )
   out.push('')
   if (review.principleDocs.length > 0) {
-    out.push(`> 원칙 문서가 바뀌었다: ${review.principleDocs.join(', ')} — 규칙이 바뀌는 변경이니 직접 확인할 것`)
+    out.push(`> ${p.docsChanged(review.principleDocs.join(', '))}`)
     out.push('')
   }
-  if (review.status === 'running') out.push('_검토 중…_')
-  if (review.status === 'error') out.push(`리뷰 실패: ${review.error ?? '알 수 없음'}`)
-  if (review.status === 'skipped') out.push('주석·문서·바이너리만 바뀌어 모델 리뷰를 건너뛰었다.')
+  if (review.status === 'running') out.push(`_${p.running}_`)
+  if (review.status === 'error') out.push(p.failed(review.error ?? p.unknown))
+  if (review.status === 'skipped') out.push(p.skipped)
   const v = review.verdict
   if (v !== undefined) {
-    out.push(`**한 일** ${v.summary || '(요약 없음)'}`)
+    out.push(`**${p.did}** ${v.summary || p.noSummary}`)
     out.push('')
-    out.push(`**의도** ${INTENT_WORD[v.intent]}${v.intentNote ? ` — ${v.intentNote}` : ''}`)
+    out.push(`**${p.intent}** ${w.intent[v.intent]}${v.intentNote ? ` — ${v.intentNote}` : ''}`)
     const open = openFindings(review)
     if (open.length > 0) {
       out.push('')
-      out.push('**지적**')
+      out.push(`**${p.findings}**`)
       for (const { finding, index: i } of open) {
-        const tag = finding.severity === 'violation' ? '위반' : '의심'
-        out.push(`${i + 1}. [${finding.principle} ${tag}] \`${where(finding)}\` — ${finding.why}`)
+        out.push(`${i + 1}. ${tag(finding, lang)} \`${where(finding)}\` — ${finding.why}`)
         if (finding.evidence) out.push(`   \`${finding.evidence.slice(0, 160)}\``)
       }
     }
-    if (review.excepted.length > 0) out.push(`\n_예외로 승인함: ${review.excepted.map(i => i + 1).join(', ')}번_`)
+    if (review.excepted.length > 0) out.push(`\n_${p.excepted(review.excepted.map(i => i + 1))}_`)
     if (v.unstated.length > 0) {
       out.push('')
-      out.push('**보고에 없던 변경**')
+      out.push(`**${p.unstated}**`)
       for (const line of v.unstated) out.push(`- ${line}`)
     }
     if (v.attention.length > 0) {
       out.push('')
-      out.push('**사람이 볼 곳**')
+      out.push(`**${p.attention}**`)
       for (const line of v.attention) out.push(`- ${line}`)
     }
     if (!hasIssues(review)) {
       out.push('')
-      out.push('지적 없음.')
+      out.push(p.noFindings)
     }
   }
   const shown = review.files.filter(f => f.kind !== 'binary').slice(0, 12)
   if (shown.length > 0) {
     out.push('')
     out.push(
-      `**파일** ${shown.map(f => `${f.path.split('/').pop()}(${KIND_WORD[f.kind]})`).join(', ')}${review.files.length > shown.length ? ` 외 ${review.files.length - shown.length}` : ''}`,
+      `**${p.files}** ${shown.map(f => `${f.path.split('/').pop()}(${w.kind[f.kind]})`).join(', ')}${review.files.length > shown.length ? p.more(review.files.length - shown.length) : ''}`,
     )
   }
   const hit = Object.keys(review.hits)
-  if (hit.length > 0) out.push(`**원칙 범위** ${hit.join(', ')}`)
+  if (hit.length > 0) out.push(`**${p.inScope}** ${hit.join(', ')}`)
   return out.join('\n')
 }
 
-export function fixPrompt(review: Review): string {
+export function fixPrompt(review: Review, lang: Lang): string {
   const v = review.verdict
   if (v === undefined) return ''
-  const lines = ['의도 리뷰가 방금 변경에서 아래를 짚었다. 원칙(.claude/principles.md)을 지키는 방향으로 고쳐 줘.', '지적이 틀렸다고 보면 고치지 말고 왜 틀렸는지 말해 줘.', '']
+  const w = WORDS[lang]
+  const lines = [...w.fix.intro, '']
   for (const { finding, index } of openFindings(review)) {
-    const tag = finding.severity === 'violation' ? '위반' : '의심'
-    lines.push(`${index + 1}. [${finding.principle} ${tag}] ${where(finding)} — ${finding.why}`)
+    lines.push(`${index + 1}. ${tag(finding, lang)} ${where(finding)} — ${finding.why}`)
   }
-  if (v.intent !== 'match' && v.intentNote) lines.push(`- 의도: ${v.intentNote}`)
-  for (const line of v.unstated) lines.push(`- 보고에 없던 변경: ${line}`)
+  if (v.intent !== 'match' && v.intentNote) lines.push(`- ${w.fix.intent}: ${v.intentNote}`)
+  for (const line of v.unstated) lines.push(`- ${w.fix.unstated}: ${line}`)
   return lines.join('\n')
 }

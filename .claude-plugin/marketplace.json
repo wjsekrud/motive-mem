@@ -1,6 +1,6 @@
 {
   "name": "motive-mem",
   "owner": { "name": "wjsekrud" },
-  "description": "Motive-mem — 턴마다 바뀐 코드를 저장소 원칙에 비춰 리뷰하는 Claude Code 모드",
+  "description": "Motive-mem — a Claude Code mod that reviews each turn's changes against your repository's principles",
   "plugins": [{ "name": "motive-mem", "source": "./" }]
 }

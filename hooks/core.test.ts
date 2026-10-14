@@ -4,6 +4,7 @@ import type { Review } from '../types'
 import {
   budgetDiff,
   buildPrompt,
+  fixPrompt,
   forReviewer,
   globToRegExp,
   hasIssues,
@@ -11,33 +12,48 @@ import {
   parseDiff,
   parsePrinciples,
   parseVerdict,
+  reviewMarkdown,
   scopeHits,
   statusLine,
+  systemPrompt,
   untrackedChunk,
 } from './core'
 
-const PRINCIPLES = `# 대원칙
+const PRINCIPLES = `# Principles
 
-머리말.
+Preamble.
+
+## P01 The core knows nothing outside it
+- Scope: app/core/**
+- Rule: no UI imports.
+
+## P06 Sync after a write goes one way
+- Scope: app/ui/**, \`app/web/**\`
+- Rule: one changed signal.
+
+## Allowed exceptions
+- Scope: this is not a principle
+
+## Open questions (not given to the reviewer)
+- Q01 are the three meta writes exceptions?
+### To ask later
+- not known yet
+
+## Recurring band-aids
+- direct setData call → P06
+`
+
+// The skill writes Korean files with Korean field names; the mode reads both
+const PRINCIPLES_KO = `# 대원칙
 
 ## P01 코어는 바깥을 모른다
 - 범위: app/core/**
-- 규칙: Qt 를 import 하지 않는다.
 
-## P06 쓰기 뒤 동기화는 한 길
-- 범위: app/ui/**, \`app/web/**\`
-- 규칙: changed 신호 하나.
+## 열린 질문
+- Q01 아직 모름
 
 ## 허용된 예외
-- 범위: 이건 원칙이 아니다
-
-## 열린 질문 (리뷰어에게는 가지 않는다)
-- Q01 meta 쓰기 셋은 예외인가
-### 더 물을 것
-- 아직 모름
-
-## 반복된 땜질
-- setData 직접 호출 → P06
+- E01 남는 절
 `
 
 const DIFF = `diff --git a/app/core/commands.py b/app/core/commands.py
@@ -54,16 +70,16 @@ index 1111111..2222222 100644
 --- a/app/core/model.py
 +++ b/app/core/model.py
 @@ -1,2 +1,2 @@
--# 권위 순서
-+# 권위 순서 (canon 이 가장 높다)
+-# authority order
++# authority order (canon is highest)
 
 diff --git a/사용 안내.md b/사용 안내.md
 index 1111111..2222222 100644
 --- a/사용 안내.md\t
 +++ b/사용 안내.md\t
 @@ -1 +1 @@
--옛 문장
-+새 문장
+-old sentence
++new sentence
 diff --git a/map.png b/map.png
 index 1111111..2222222 100644
 Binary files a/map.png and b/map.png differ
@@ -80,7 +96,7 @@ index 1111111..2222222 100644
 +++ b/CLAUDE.md
 @@ -1 +1 @@
 -# CLAUDE.md
-+# CLAUDE.md (고침)
++# CLAUDE.md (edited)
 `
 
 function review(over: Partial<Review>): Review {
@@ -101,26 +117,33 @@ function review(over: Partial<Review>): Review {
   }
 }
 
-describe('원칙 문서', () => {
-  test('ID 붙은 제목만 원칙으로 읽고 범위를 쉼표로 나눈다', () => {
+describe('principles doc', () => {
+  test('only headings with an ID are principles; scope splits on commas', () => {
     const list = parsePrinciples(PRINCIPLES)
     expect(list.map(p => p.id)).toEqual(['P01', 'P06'])
     expect(list[1]?.scope).toEqual(['app/ui/**', 'app/web/**'])
   })
 
-  test('glob: ** 는 폴더를 건너고 * 는 한 칸 안에서만', () => {
+  test('Korean field and section names read the same', () => {
+    expect(parsePrinciples(PRINCIPLES_KO)).toEqual([{ id: 'P01', title: '코어는 바깥을 모른다', scope: ['app/core/**'] }])
+    const text = forReviewer(PRINCIPLES_KO)
+    expect(text).not.toContain('아직 모름')
+    expect(text).toContain('E01 남는 절')
+  })
+
+  test('glob: ** crosses folders, * stays inside one', () => {
     expect(globToRegExp('app/core/**').test('app/core/render/tiler.py')).toBe(true)
     expect(globToRegExp('app/core/**').test('app/cli/main.py')).toBe(false)
     expect(globToRegExp('app/*.py').test('app/a/b.py')).toBe(false)
     expect(globToRegExp('**/test_*.py').test('tests/test_cli.py')).toBe(true)
   })
 
-  test('열린 질문 절은 리뷰어에게 주는 글에서 빠지고 그 다음 절은 남는다', () => {
+  test('the open questions section is cut from what the reviewer gets; the next section stays', () => {
     const text = forReviewer(PRINCIPLES)
-    expect(text).not.toContain('meta 쓰기 셋')
-    expect(text).not.toContain('아직 모름')
+    expect(text).not.toContain('three meta writes')
+    expect(text).not.toContain('not known yet')
     expect(text).toContain('## P06')
-    expect(text).toContain('setData 직접 호출 → P06')
+    expect(text).toContain('direct setData call → P06')
     expect(parsePrinciples(PRINCIPLES).map(p => p.id)).toEqual(['P01', 'P06'])
     const blocks = buildPrompt({
       principles: PRINCIPLES,
@@ -130,15 +153,13 @@ describe('원칙 문서', () => {
       diff: '',
       hits: {},
       maxDiffChars: 1000,
+      lang: 'en',
     })
-    expect(blocks[0]?.text).not.toContain('열린 질문')
+    expect(blocks[0]?.text).not.toContain('Open questions')
   })
 
-  test('바뀐 파일이 어느 원칙 범위에 드는지', () => {
-    const hits = scopeHits(parsePrinciples(PRINCIPLES), [
-      'app/core/commands.py',
-      'app/web/commands.js',
-    ])
+  test('which principle scopes the changed files fall in', () => {
+    const hits = scopeHits(parsePrinciples(PRINCIPLES), ['app/core/commands.py', 'app/web/commands.js'])
     expect(hits).toEqual({
       P01: ['app/core/commands.py'],
       P06: ['app/web/commands.js'],
@@ -146,8 +167,8 @@ describe('원칙 문서', () => {
   })
 })
 
-describe('diff 나누기', () => {
-  test('코드 · 주석만 · 문서(한글 · 띄어쓰기 이름) · 바이너리 · 테스트 · 원칙 문서', () => {
+describe('splitting the diff', () => {
+  test('code · comments only · docs (Hangul and spaces in the name) · binary · test · principles doc', () => {
     const files = parseDiff(DIFF)
     expect(files.map(f => [f.path, f.kind])).toEqual([
       ['app/core/commands.py', 'code'],
@@ -163,72 +184,91 @@ describe('diff 나누기', () => {
     expect(levelOf(files.filter(f => f.kind !== 'code' && f.kind !== 'test'))).toBe('trivial')
   })
 
-  test('추적 안 되는 새 파일은 전부 + 줄인 새 파일로', () => {
+  test('an untracked new file becomes a new file of all + lines', () => {
     const [file] = parseDiff(untrackedChunk('app/core/new.py', 'a = 1\r\nb = 2\r\n'))
     expect(file).toMatchObject({ path: 'app/core/new.py', status: 'added', added: 2, kind: 'code' })
   })
 
-  test('분량이 넘치면 코드부터 넣고 나머지는 이름만', () => {
+  test('over budget, code goes in first and the rest by name only', () => {
     const files = parseDiff(DIFF)
     const code = DIFF.slice(0, DIFF.indexOf('diff --git a/app/core/model.py'))
     const out = budgetDiff(files, DIFF, code.length + 10)
     expect(out.startsWith('diff --git a/app/core/commands.py')).toBe(true)
-    expect(out).toContain('분량 때문에 diff 를 뺀 파일')
+    expect(out).toContain('diff left out for length')
     expect(out).toContain('tests/test_cli.py')
     expect(out).not.toContain('map.png (')
   })
 
-  test('요청 블록: 원칙이 먼저이고 캐시 표시, 파일마다 원칙 범위', () => {
+  test('request blocks: principles first and cached, scope per file, answer language last', () => {
     const files = parseDiff(DIFF)
     const blocks = buildPrompt({
       principles: PRINCIPLES,
-      decisions: [{ at: 0, principle: 'P06', file: 'x.js', why: '방향 뒤집기는 예외' }],
-      intent: { prompts: ['쓰기 버그 고쳐줘'], answer: '쓰기 경로를 고쳤습니다.' },
+      decisions: [{ at: 0, principle: 'P06', file: 'x.js', why: 'reversing the direction is an exception' }],
+      intent: { prompts: ['fix the write bug'], answer: 'Fixed the write path.' },
       files,
       diff: DIFF,
       hits: { P01: ['app/core/commands.py'] },
       maxDiffChars: 100_000,
+      lang: 'ko',
     })
     expect(blocks[0]?.cache).toBe(true)
     expect(blocks[0]?.text).toContain('## P01')
-    expect(blocks[1]?.text).toContain('app/core/commands.py (코드, modified, +2 -1) [원칙 범위: P01]')
-    expect(blocks[1]?.text).toContain('P06 x.js: 방향 뒤집기는 예외')
+    expect(blocks[1]?.text).toContain('app/core/commands.py (code, modified, +2 -1) [in scope of: P01]')
+    expect(blocks[1]?.text).toContain('P06 x.js: reversing the direction is an exception')
+    expect(blocks[1]?.text.trimEnd().endsWith('principles are in.')).toBe(true)
+    expect(blocks[1]?.text).toContain('in Korean')
+    expect(systemPrompt('en')).toContain('in English')
   })
 })
 
-describe('답 읽기', () => {
-  test('코드 블록에 싸인 JSON 도 읽고, 모르는 심각도는 의심으로 낮춘다', () => {
+describe('reading the answer', () => {
+  test('reads JSON wrapped in a code fence; an unknown severity drops to suspect', () => {
     const v = parseVerdict(
-      '```json\n{"summary":"쓰기를 우회","intent":"partial","intent_note":"보고와 다름","findings":[{"principle":"P03","severity":"critical","file":"a.py","line":12.4,"why":"apply_changeset 을 건너뜀","evidence":"store.raw_write(cs)"},{"principle":"P01","why":""}],"unstated":["b.py 이름 바꿈",""],"attention":["a","b","c","d"]}\n```',
+      '```json\n{"summary":"bypasses the write","intent":"partial","intent_note":"differs from the report","findings":[{"principle":"P03","severity":"critical","file":"a.py","line":12.4,"why":"skips apply_changeset","evidence":"store.raw_write(cs)"},{"principle":"P01","why":""}],"unstated":["renamed b.py",""],"attention":["a","b","c","d"]}\n```',
     )
     expect(v?.intent).toBe('partial')
     expect(v?.findings).toEqual([
-      { principle: 'P03', severity: 'suspect', file: 'a.py', line: 12, why: 'apply_changeset 을 건너뜀', evidence: 'store.raw_write(cs)' },
+      { principle: 'P03', severity: 'suspect', file: 'a.py', line: 12, why: 'skips apply_changeset', evidence: 'store.raw_write(cs)' },
     ])
-    expect(v?.unstated).toEqual(['b.py 이름 바꿈'])
+    expect(v?.unstated).toEqual(['renamed b.py'])
     expect(v?.attention.length).toBe(3)
   })
 
-  test('JSON 이 아니면 undefined', () => {
-    expect(parseVerdict('잘 모르겠습니다')).toBeUndefined()
-    expect(parseVerdict('{ 깨진')).toBeUndefined()
+  test('not JSON → undefined', () => {
+    expect(parseVerdict('not sure')).toBeUndefined()
+    expect(parseVerdict('{ broken')).toBeUndefined()
   })
 
-  test('예외로 승인한 지적은 상태 줄에서 빠진다', () => {
+  test('a finding approved as an exception leaves the status line', () => {
     const verdict = parseVerdict(
-      '{"summary":"s","intent":"match","findings":[{"principle":"P03","severity":"violation","file":"a.py","why":"우회"}],"unstated":[]}',
+      '{"summary":"s","intent":"match","findings":[{"principle":"P03","severity":"violation","file":"a.py","why":"bypass"}],"unstated":[]}',
     )
     const open = review({ verdict })
     expect(hasIssues(open)).toBe(true)
-    expect(statusLine(open)).toContain('위반 1')
+    expect(statusLine(open, 'en')).toContain('1 violation')
+    expect(statusLine(open, 'ko')).toContain('위반 1')
     const excepted = review({ verdict, excepted: [0] })
     expect(hasIssues(excepted)).toBe(false)
-    expect(statusLine(excepted)).toContain('지적 없음')
+    expect(statusLine(excepted, 'en')).toContain('no findings')
+    expect(statusLine(excepted, 'ko')).toContain('지적 없음')
+  })
+
+  test('a band-aid with no principle shows in the chosen language, old Korean logs included', () => {
+    const verdict = parseVerdict(
+      '{"summary":"s","intent":"match","findings":[{"severity":"violation","file":"t.py","why":"loosened the assertion"},{"principle":"땜질","severity":"suspect","file":"u.py","why":"old log"}],"unstated":["b.py renamed"]}',
+    )
+    expect(verdict?.findings[0]?.principle).toBe('workaround')
+    const r = review({ verdict })
+    expect(reviewMarkdown(r, 0, 1, 'en')).toContain('[workaround violation]')
+    expect(reviewMarkdown(r, 0, 1, 'en')).toContain('[workaround suspect]')
+    expect(reviewMarkdown(r, 0, 1, 'ko')).toContain('[땜질 위반]')
+    expect(fixPrompt(r, 'en')).toContain('Changed but not in the report: b.py renamed')
+    expect(fixPrompt(r, 'ko')).toContain('보고에 없던 변경: b.py renamed')
   })
 })
 
-describe('패널', () => {
-  test('리뷰가 없으면 안내 문장과 전체 검토 단추', async $ => {
+describe('panel', () => {
+  test('with no reviews: the hint and the review-all button', async $ => {
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({
         plugin: 'motive-mem',
@@ -236,7 +276,7 @@ describe('패널', () => {
         component: 'Pane',
         requestId: 'motive-mem',
         props: {
-          title: '의도 리뷰',
+          title: 'Intent review',
           isFocused: false,
           bodyColumns: 60,
           placement: 'dock',
@@ -244,7 +284,7 @@ describe('패널', () => {
           view: {},
         },
       })
-      expect(await ui.find({ type: 'Text', text: /아직 리뷰가 없습니다/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /No reviews yet/ })).toBeDefined()
       expect(await ui.find({ key: 'all' })).toBeDefined()
       await ui.unmount()
     }
