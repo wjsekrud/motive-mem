@@ -34,7 +34,7 @@ Claude 와 다른 모델이 따로 리뷰한다. 한 줄씩 보는 코드 리뷰
 얼리 액세스라 릴리스마다 바뀔 수 있다.
 
 ```sh
-claude plugin marketplace add wjsekrud/Motive-mem
+claude plugin marketplace add wjsekrud/motive-mem
 claude plugin install motive-mem@motive-mem
 ```
 

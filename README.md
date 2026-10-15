@@ -44,7 +44,7 @@ Requires Claude Code with mods (plugin hooks modules). Built and tested on Claud
 access and may change between releases.
 
 ```sh
-claude plugin marketplace add wjsekrud/Motive-mem
+claude plugin marketplace add wjsekrud/motive-mem
 claude plugin install motive-mem@motive-mem
 ```
 

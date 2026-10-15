@@ -5,8 +5,8 @@
   "author": {
     "name": "wjsekrud"
   },
-  "homepage": "https://github.com/wjsekrud/Motive-mem",
-  "repository": "https://github.com/wjsekrud/Motive-mem",
+  "homepage": "https://github.com/wjsekrud/motive-mem",
+  "repository": "https://github.com/wjsekrud/motive-mem",
   "license": "MIT",
   "keywords": ["code-review", "intent", "principles", "drift", "mod"],
   "types": "./types/index.d.ts",
