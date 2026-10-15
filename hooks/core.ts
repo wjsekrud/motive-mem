@@ -443,7 +443,7 @@ export function reviewMarkdown(review: Review, index: number, count: number, lan
   if (v !== undefined) {
     out.push(`**${p.did}** ${v.summary || p.noSummary}`)
     out.push('')
-    out.push(`**${p.intent}** ${w.intent[v.intent]}${v.intentNote ? ` — ${v.intentNote}` : ''}`)
+    out.push(`**${w.intent[v.intent]}**${v.intentNote ? ` — ${v.intentNote}` : ''}`)
     const open = openFindings(review)
     if (open.length > 0) {
       out.push('')

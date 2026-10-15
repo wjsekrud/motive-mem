@@ -253,6 +253,14 @@ describe('reading the answer', () => {
     expect(statusLine(excepted, 'ko')).toContain('지적 없음')
   })
 
+  test('the panel names the intent verdict once', () => {
+    const r = review({ verdict: parseVerdict('{"summary":"s","intent":"match","findings":[],"unstated":[]}') })
+    expect(reviewMarkdown(r, 0, 1, 'en')).toContain('**matches intent**')
+    expect(reviewMarkdown(r, 0, 1, 'en')).not.toContain('Intent** matches')
+    expect(reviewMarkdown(r, 0, 1, 'ko')).toContain('**의도 일치**')
+    expect(reviewMarkdown(r, 0, 1, 'ko')).not.toContain('의도** 의도')
+  })
+
   test('a band-aid with no principle shows in the chosen language, old Korean logs included', () => {
     const verdict = parseVerdict(
       '{"summary":"s","intent":"match","findings":[{"severity":"violation","file":"t.py","why":"loosened the assertion"},{"principle":"땜질","severity":"suspect","file":"u.py","why":"old log"}],"unstated":["b.py renamed"]}',

@@ -38,7 +38,6 @@ export type Words = {
     skipped: string
     did: string
     noSummary: string
-    intent: string
     findings: string
     excepted: (numbers: number[]) => string
     unstated: string
@@ -113,7 +112,6 @@ const en: Words = {
     skipped: 'Only comments, docs or binaries changed — skipped the model review.',
     did: 'What it did',
     noSummary: '(no summary)',
-    intent: 'Intent',
     findings: 'Findings',
     excepted: numbers => `Approved as exceptions: ${numbers.map(n => `#${n}`).join(', ')}`,
     unstated: 'Changed but not in the report',
@@ -193,7 +191,6 @@ const ko: Words = {
     skipped: '주석·문서·바이너리만 바뀌어 모델 리뷰를 건너뛰었다.',
     did: '한 일',
     noSummary: '(요약 없음)',
-    intent: '의도',
     findings: '지적',
     excepted: numbers => `예외로 승인함: ${numbers.join(', ')}번`,
     unstated: '보고에 없던 변경',
