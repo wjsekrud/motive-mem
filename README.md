@@ -12,9 +12,9 @@ the code checks what that turn changed against your repository's `.claude/princi
 - **Band-aid fixes** — traces of routing around the structure to make a local problem go away (skipping the entry
   point, a second copy, changing test expectations …).
 
-<img src="docs/panel-ko.png" width="480" alt="The review panel after a turn: a suspected violation of principle P05 with its file, line and code, where a person should look, the files the turn touched, and buttons to send the findings to Claude, review again or approve the finding as an exception">
+<img src="docs/panel.png" alt="The review panel after a turn: what the turn did, whether it matches intent, three suspected principle violations (P05, P06, P07) each with its file, line and code, where a person should look, the files the turn touched, and buttons to send the findings to Claude, review again or approve a finding as an exception">
 
-_The panel after a turn, shown with `language: ko`._
+_The panel after a turn._
 
 Inspired by Anthropic's [Redesigning source control](https://www.anthropic.com/engineering/redesigning-source-control)
 (Scion · Antique) — people review intent rather than lines, and the recurring job is an agent saying "no" when a change

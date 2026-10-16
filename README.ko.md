@@ -9,7 +9,9 @@ Claude 와 다른 모델이 따로 리뷰한다. 한 줄씩 보는 코드 리뷰
 - 원칙 위반 — 저장소가 정해 둔 원칙(층, 한 길, "그 한 곳", 약속)을 어겼는가.
 - 눈앞 땜질 — 국소 문제를 맞추려고 구조를 우회한 흔적(진입점 건너뛰기, 두 번째 사본, 테스트 기대값 바꾸기 …).
 
-<img src="docs/panel-ko.png" width="480" alt="턴이 끝난 뒤의 리뷰 패널: 원칙 P05 의심 지적과 그 파일 · 줄 · 코드, 사람이 볼 곳, 턴에서 바뀐 파일, Claude에게 전달 · 다시 검토 · 예외 승인 버튼">
+<img src="docs/panel.png" alt="턴이 끝난 뒤의 리뷰 패널: 그 턴이 한 일, 의도 일치 여부, 원칙 P05 · P06 · P07 의심 지적 셋과 각각의 파일 · 줄 · 코드, 사람이 볼 곳, 턴에서 바뀐 파일, Claude에게 전달 · 다시 검토 · 예외 승인 버튼">
+
+_턴이 끝난 뒤의 패널(`language: en`). `ko` 로 두면 한국어로 나온다._
 
 착안: Anthropic 의 [Redesigning source control](https://www.anthropic.com/engineering/redesigning-source-control)
 (Scion · Antique) — 사람은 줄이 아니라 의도를 검토하고, 반복되는 일은 에이전트가 대원칙을 깰 때 "아니"라고 하는 것.
