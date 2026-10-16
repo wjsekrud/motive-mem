@@ -1,6 +1,6 @@
 {
   "name": "motive-mem",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "After every turn, a separate model reviews what changed against your repo's .claude/principles.md — intent, principle violations, band-aid fixes — and shows it in a panel",
   "author": {
     "name": "wjsekrud"

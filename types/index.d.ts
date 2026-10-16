@@ -36,7 +36,8 @@ export type Verdict = {
 
 export type Decision = { at: number; principle: string; file: string; why: string }
 
-export type Intent = { prompts: string[]; answer: string }
+// `isAll`: the review covers every uncommitted change, so there is no report to hold the diff to
+export type Intent = { prompts: string[]; answer: string; isAll?: boolean }
 
 export type Review = {
   id: string

@@ -13,9 +13,13 @@ import {
   PRINCIPLES_PATH,
   appendedLog,
   buildPrompt,
+  cut,
   fixPrompt,
+  forLog,
   hasIssues,
   inOrder,
+  kindOf,
+  latestById,
   levelOf,
   openFindings,
   parseDiff,
@@ -74,16 +78,39 @@ async function whyOff($: Engine): Promise<string> {
   return (await gitRepo($)) === undefined ? c.notRepo : c.noPrinciples(PRINCIPLES_PATH)
 }
 
-async function snapshot($: Engine, repo: Repo): Promise<Snap | undefined> {
-  const stash = await git($, repo.top, ['stash', 'create'])
-  let rev = stash.exitCode === 0 ? stash.stdout.trim() : ''
-  if (rev === '') {
-    const head = await git($, repo.top, ['rev-parse', 'HEAD'])
-    rev = head.exitCode === 0 ? head.stdout.trim() : ''
+const firstLine = (text: string) => text.trim().split(/\r?\n/)[0] ?? ''
+
+// The snapshot, or why there is none. `git stash create` fails while another git command holds the index lock
+// (an editor's `git status`, another session's snapshot) and while the index has unmerged or intent-to-add
+// entries. A failure is never taken for a clean tree — that would review the wrong diff: it is retried a few
+// times, then reported.
+async function snapshot($: Engine, repo: Repo): Promise<Snap | string> {
+  let failure = ''
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await $.clock.sleep(150 * attempt)
+    const stash = await git($, repo.top, ['stash', 'create'])
+    if (stash.exitCode !== 0) {
+      failure = firstLine(stash.stderr) || `git stash create: ${stash.exitCode}`
+      continue
+    }
+    // Empty output: nothing changed since HEAD
+    let rev = stash.stdout.trim()
+    if (rev === '') {
+      const head = await git($, repo.top, ['rev-parse', '--verify', '-q', 'HEAD'])
+      if (head.exitCode !== 0) return words().command.noHead
+      rev = head.stdout.trim()
+    }
+    const listed = await git($, repo.top, ['ls-files', '--others', '--exclude-standard', '-z'])
+    if (listed.exitCode !== 0) {
+      failure = firstLine(listed.stderr)
+      continue
+    }
+    const untracked = listed.stdout.split('\0').filter(Boolean)
+    // Cut at 4 MiB: the last path may be half of one
+    if (listed.isStdoutTruncated) untracked.pop()
+    return { rev, untracked }
   }
-  if (rev === '') return undefined
-  const listed = await git($, repo.top, ['ls-files', '--others', '--exclude-standard', '-z'])
-  return { rev, untracked: listed.stdout.split('\0').filter(Boolean) }
+  return failure
 }
 
 async function changes(
@@ -93,9 +120,32 @@ async function changes(
   to: string,
   fresh: string[],
 ): Promise<{ files: FileChange[]; diff: string }> {
-  const out = await git($, repo.top, ['diff', '--no-color', '--no-ext-diff', '-M', '-U3', from, to])
+  // a/ and b/ whatever diff.noprefix, diff.mnemonicPrefix or diff.srcPrefix say — parseDiff reads them
+  const out = await git($, repo.top, [
+    'diff',
+    '--no-color',
+    '--no-ext-diff',
+    '--src-prefix=a/',
+    '--dst-prefix=b/',
+    '-M',
+    '-U3',
+    from,
+    to,
+  ])
   let diff = out.exitCode === 0 ? out.stdout : ''
   const files = parseDiff(diff)
+  if (out.isStdoutTruncated) {
+    // Past 4 MiB the output is cut: the last file's diff is partial and the ones after it are missing. Every
+    // changed file is still listed — as code, unless its name says otherwise — so none drops out unseen.
+    const last = files.at(-1)
+    if (last?.kind === 'comment') last.kind = 'code'
+    const known = new Set(files.map(f => f.path))
+    const names = await git($, repo.top, ['diff', '--name-only', '-z', '-M', from, to])
+    for (const path of names.stdout.split('\0').filter(Boolean)) {
+      if (known.has(path)) continue
+      files.push({ path, status: 'modified', added: 0, removed: 0, kind: kindOf(path, [], false), lines: [] })
+    }
+  }
   for (const path of fresh.slice(0, FRESH_LIMIT)) {
     const text = BINARY.test(path)
       ? undefined
@@ -156,18 +206,35 @@ function gitLock($: Engine, repo: Repo): Lock {
   }
 }
 
+const READ_LIMIT = 4 * 1024 * 1024
+
+// The log as it stands: '' when there is none yet, or when it grew past what $.fs reads (it starts over then).
+// Any other failure to read throws — writing after it would wipe the lines that could not be read.
+async function logText($: Engine, path: string): Promise<string> {
+  if (!(await $.fs.exists(path))) return ''
+  const { size } = await $.fs.stat(path)
+  return size > READ_LIMIT ? '' : $.fs.read(path)
+}
+
 async function appendLine($: Engine, repo: Repo, path: string, value: unknown, keep: number) {
   const clock = { now: () => $.clock.now(), sleep: (ms: number) => $.clock.sleep(ms) }
   await oneAtATime(() =>
     withLock(gitLock($, repo), clock, owner, async () => {
-      const text = await $.fs.read(path).catch(() => '')
-      await $.fs.write(path, appendedLog(text, value, keep))
+      await $.fs.write(path, appendedLog(await logText($, path), value, keep))
     }),
   )
 }
 
 const reviewLog = (repo: Repo) => `${repo.gitDir}/motive-mem/reviews.jsonl`
 const decisionLog = (repo: Repo) => `${repo.gitDir}/motive-mem/decisions.jsonl`
+const LOG_KEEP = 200
+
+// A failed log write must not take the result with it: it is noted in the debug log
+async function logReview($: Engine, repo: Repo, review: Review) {
+  await appendLine($, repo, reviewLog(repo), forLog(review, FRESH_LIMIT), LOG_KEEP).catch(err =>
+    $.ui.log(`motive-mem: could not write the review log: ${String(err)}`, { to: 'debug' }),
+  )
+}
 
 // ---- state
 
@@ -211,7 +278,8 @@ async function review(
     if (origin !== 'turn') $.ui.toast(words().command.nothing)
     return
   }
-  const principlesText = await $.fs.read(`${repo.top}/${PRINCIPLES_PATH}`)
+  // Gone when this very turn deleted it: the deletion is still reviewed (and flagged as a principles change)
+  const principlesText = await $.fs.read(`${repo.top}/${PRINCIPLES_PATH}`).catch(() => '')
   const hits = scopeHits(
     parsePrinciples(principlesText),
     files.filter(f => f.kind === 'code' || f.kind === 'test').map(f => f.path),
@@ -238,49 +306,63 @@ async function review(
     $.ui.toast(words().docsChangedToast(draft.principleDocs.join(', ')))
   }
   if (draft.status === 'skipped') {
-    await appendLine($, repo, reviewLog(repo), draft, 500)
+    await logReview($, repo, draft)
     return
   }
 
-  const decisions = await readLines<Decision>($, decisionLog(repo), 30)
-  const answer = await $.model.complete({
-    model: config.model,
-    effort: config.effort,
-    system: systemPrompt(config.lang),
-    prompt: buildPrompt({
-      principles: principlesText,
-      decisions,
-      intent,
-      files,
-      diff,
-      hits,
-      maxDiffChars: config.maxDiffChars,
-      lang: config.lang,
-    }),
-    maxTokens: 4000,
-    timeoutMs: 240_000,
-  })
+  // From here on the draft is on screen as running: whatever happens, it ends as done or error — never stuck
   let done: Review
-  if (!answer.isAnswered) {
-    done = { ...draft, status: 'error', error: answer.reason }
-  } else {
-    const verdict = parseVerdict(answer.text)
-    done =
-      verdict === undefined
-        ? { ...draft, status: 'error', error: words().unreadable(answer.text.slice(0, 120)) }
-        : { ...draft, status: 'done', verdict }
+  try {
+    const decisions = await readLines<Decision>($, decisionLog(repo), 30)
+    const answer = await $.model.complete({
+      model: config.model,
+      effort: config.effort,
+      system: systemPrompt(config.lang),
+      prompt: buildPrompt({
+        principles: principlesText,
+        decisions,
+        intent,
+        files,
+        diff,
+        hits,
+        maxDiffChars: config.maxDiffChars,
+        lang: config.lang,
+      }),
+      maxTokens: 8000,
+      timeoutMs: 240_000,
+    })
+    if (!answer.isAnswered) {
+      const why =
+        answer.reason === 'api-error'
+          ? `api-error: ${answer.error}${answer.status === null ? '' : ` (${answer.status})`}`
+          : answer.reason
+      done = { ...draft, status: 'error', error: why }
+    } else {
+      const verdict = parseVerdict(answer.text)
+      done =
+        verdict === undefined
+          ? { ...draft, status: 'error', error: words().unreadable(cut(answer.text, 120)) }
+          : { ...draft, status: 'done', verdict }
+    }
+  } catch (err) {
+    done = { ...draft, status: 'error', error: String(err) }
   }
   await replace($, done)
   $.ui.status(statusLine(done, config.lang))
-  await appendLine($, repo, reviewLog(repo), done, 500)
   if (hasIssues(done)) {
     const first = openFindings(done)[0]?.finding
     $.ui.toast(
       first ? `${principleLabel(first.principle, config.lang)}: ${first.why}` : statusLine(done, config.lang),
       { timeoutMs: 8000 },
     )
-    if (config.openOnIssue) void $.ui.open({ id: PANE, title: words().title })
+    if (config.openOnIssue) {
+      // Show this review: another one may have started — and finished — after it
+      const index = (await read($, reviews)).findIndex(r => r.id === done.id)
+      if (index >= 0) await update($, cursor, () => index)
+      void $.ui.open({ id: PANE, title: words().title })
+    }
   }
+  await logReview($, repo, done)
 }
 
 function later($: Engine, work: () => Promise<void>) {
@@ -292,50 +374,70 @@ function later($: Engine, work: () => Promise<void>) {
 async function reviewAll($: Engine) {
   const repo = await repoOf($)
   if (repo === undefined) return whyOff($)
-  const head = await git($, repo.top, ['rev-parse', 'HEAD'])
+  const head = await git($, repo.top, ['rev-parse', '--verify', '-q', 'HEAD'])
+  if (head.exitCode !== 0) return words().command.noHead
   const now = await snapshot($, repo)
-  if (head.exitCode !== 0 || now === undefined) return words().command.noHead
+  if (typeof now === 'string') return words().status.snapshotFailed(now)
   const range = { from: head.stdout.trim(), to: now.rev, fresh: now.untracked }
-  later($, () => review($, repo, range, { prompts: [...prompts], answer: '' }, 'all'))
+  later($, () => review($, repo, range, { prompts: [...prompts], answer: '', isAll: true }, 'all'))
   return words().command.reviewingAll
 }
 
 export const register: Register = (on, options) => {
+  const maxDiffChars = Number(options.maxDiffChars)
   config = {
-    model: String(options.model ?? 'sonnet'),
-    effort: String(options.effort ?? 'medium') as Config['effort'],
-    maxDiffChars: Number(options.maxDiffChars ?? 60_000),
+    model: typeof options.model === 'string' && options.model.trim() !== '' ? options.model.trim() : 'sonnet',
+    effort: options.effort === 'low' || options.effort === 'high' ? options.effort : 'medium',
+    maxDiffChars: Number.isFinite(maxDiffChars) && maxDiffChars >= 1000 ? maxDiffChars : 60_000,
     openOnIssue: options.openOnIssue !== false,
     lang: langOf(options.language),
   }
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({ name: 'motive-mem', description: words().command.description })
+    const w = words()
+    await $.command.register({ name: 'motive-mem', description: w.command.description })
     const repo = await repoOf($)
     if (repo !== undefined && (await read($, reviews)).length === 0) {
-      const saved = await readLines<Review>($, reviewLog(repo), KEEP)
+      const saved = latestById(await readLines<Review>($, reviewLog(repo), LOG_KEEP), KEEP)
       if (saved.length > 0) await update($, reviews, () => saved)
     }
-    const last = (await read($, reviews)).at(-1)
+    // A review the previous environment was still running (it was reloaded) never finishes: let it be run again
+    if ((await read($, reviews)).some(r => r.status === 'running')) {
+      await update($, reviews, list =>
+        list.map(r => (r.status === 'running' ? { ...r, status: 'error' as const, error: w.interrupted } : r)),
+      )
+    }
     if (repo !== undefined) {
-      $.ui.status(last ? statusLine(last, config.lang) : `${words().title} · ${words().status.on}`)
+      const last = (await read($, reviews)).at(-1)
+      $.ui.status(
+        (await read($, isPaused))
+          ? `${w.title} · ${w.status.paused}`
+          : last
+            ? statusLine(last, config.lang)
+            : `${w.title} · ${w.status.on}`,
+      )
     }
     return started
   })
 
   on('turn.start', async ($, e, next) => {
-    if (!(await read($, isPaused))) {
-      const repo = await repoOf($)
-      if (repo === undefined) {
+    // A subagent's or teammate's run belongs to the main turn, whose review covers what it changed
+    if (e.agentId !== undefined || (await read($, isPaused))) return next(e)
+    const repo = await repoOf($)
+    if (repo === undefined) {
+      pending = undefined
+      return next(e)
+    }
+    if (e.text.trim() !== '') prompts = [...prompts, e.text.trim()].slice(-3)
+    // Keep the start of a stopped (aborted) turn — the next turn's review covers both
+    if (pending === undefined || pending.repo.top !== repo.top) {
+      const snap = await snapshot($, repo).catch(err => String(err))
+      if (typeof snap === 'string') {
         pending = undefined
+        $.ui.status(cut(`${words().title} · ${words().status.snapshotFailed(snap)}`, 160))
       } else {
-        if (e.text.trim() !== '') prompts = [...prompts, e.text.trim()].slice(-3)
-        // Keep the start of a stopped (aborted) turn — the next turn's review covers both
-        if (pending === undefined || pending.repo.top !== repo.top) {
-          const snap = await snapshot($, repo).catch(() => undefined)
-          pending = snap === undefined ? undefined : { repo, snap }
-        }
+        pending = { repo, snap }
       }
     }
     return next(e)
@@ -349,7 +451,10 @@ export const register: Register = (on, options) => {
     const intent: Intent = { prompts: [...prompts], answer: e.answer }
     later($, async () => {
       const end = await snapshot($, repo)
-      if (end === undefined) return
+      if (typeof end === 'string') {
+        $.ui.status(cut(`${words().title} · ${words().status.snapshotFailed(end)}`, 160))
+        return
+      }
       const before = new Set(snap.untracked)
       const fresh = end.untracked.filter(path => !before.has(path))
       if (end.rev === snap.rev && fresh.length === 0) return
@@ -360,7 +465,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'motive-mem' }, async ($, e) => {
     const w = words()
-    const arg = e.args.trim()
+    const arg = e.args.trim().toLowerCase()
     if (arg === 'pause') {
       await update($, isPaused, () => true)
       pending = undefined
@@ -398,8 +503,14 @@ export const register: Register = (on, options) => {
     const shown = list[index]
     if (shown === undefined) return <Text dimColor>{p.notFound}</Text>
     const open = openFindings(shown)
-    const move = (step: number) =>
-      update($, cursor, () => Math.min(list.length - 1, Math.max(0, index + step)))
+    // Handlers read the state as it is when pressed, not as it was drawn: two presses before a redraw both count
+    const move = async (step: number) => {
+      const count = (await read($, reviews)).length
+      await update($, cursor, at => {
+        const from = at < 0 || at >= count ? count - 1 : at
+        return Math.min(count - 1, Math.max(0, from + step))
+      })
+    }
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -420,7 +531,7 @@ export const register: Register = (on, options) => {
               label={p.send}
               hotkey="c"
               variant="primary"
-              onPress={() => void $.prompt.fill({ text: fixPrompt(shown, config.lang) })}
+              onPress={() => void $.prompt.fill({ text: fixPrompt(shown, config.lang), mode: 'append' })}
             />
           )}
           {shown.status !== 'running' && shown.level !== 'trivial' && (
@@ -436,7 +547,7 @@ export const register: Register = (on, options) => {
               }}
             />
           )}
-          <Button key="all" label={p.uncommitted} hotkey="a" onPress={() => void reviewAll($)} />
+          <Button key="all" label={p.uncommitted} hotkey="a" onPress={async () => $.ui.toast(await reviewAll($))} />
         </Box>
         {open.length > 0 && (
           <Box flexDirection="column">
@@ -445,21 +556,38 @@ export const register: Register = (on, options) => {
               <Button
                 key={`except:${shown.id}:${i}`}
                 label={p.except(i + 1, principleLabel(finding.principle, config.lang), finding.file.split('/').pop() ?? '')}
-                hotkey={String(i + 1)}
+                // One digit only — the engine refuses the whole pane over a "10"
+                hotkey={i < 9 ? String(i + 1) : undefined}
                 dimColor
                 onPress={async () => {
                   const repo = await repoOf($)
                   if (repo === undefined) return
+                  let updated = undefined as Review | undefined
+                  await update($, reviews, list =>
+                    list.map(r => {
+                      if (r.id !== shown.id || r.excepted.includes(i)) return r
+                      updated = { ...r, excepted: [...r.excepted, i] }
+                      return updated
+                    }),
+                  )
+                  // Already approved by an earlier press
+                  if (updated === undefined) return
+                  $.ui.status(statusLine(updated, config.lang))
                   const decision: Decision = {
                     at: await $.clock.now(),
                     principle: finding.principle,
                     file: finding.file,
                     why: finding.why,
                   }
-                  await appendLine($, repo, decisionLog(repo), decision, 200)
-                  const updated = { ...shown, excepted: [...shown.excepted, i] }
-                  await replace($, updated)
-                  $.ui.status(statusLine(updated, config.lang))
+                  const saved = await appendLine($, repo, decisionLog(repo), decision, LOG_KEEP).then(
+                    () => true,
+                    err => {
+                      $.ui.toast(words().notSaved(String(err)), { timeoutMs: 8000 })
+                      return false
+                    },
+                  )
+                  // The review's line again, with the approval, so a later session restores it approved
+                  if (saved) await logReview($, repo, updated)
                 }}
               />
             ))}

@@ -91,6 +91,8 @@ Criteria and procedure: [`skills/principles/SKILL.md`](skills/principles/SKILL.m
 
 - One model call per turn that changes code.
 - Edits to files that were never tracked are invisible; up to 30 new untracked files per turn.
+- A turn git cannot snapshot — another git command holding the index lock, a merge in progress, an intent-to-add
+  entry — is not reviewed; the status line says so.
 - The same model family writes and reviews, so their blind spots can overlap.
 - The mod API is early access — if the mod stops loading after a Claude Code update, check for a newer version.
 

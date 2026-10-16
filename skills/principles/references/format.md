@@ -39,10 +39,12 @@ words in parentheses after a section name are free text — write them in the fi
 
 - `## P01 Title` — the ID is one `[A-Z]` letter plus 1–3 digits in the heading. Headings without an ID, like
   `## Allowed exceptions`, are not read as principles, and the lines under them attach to no principle.
-- `- Scope:` (or `- 범위:`) — comma-separated globs. `**` crosses folders, `*` stays within one. Which principle's scope
-  a changed file falls in is counted from this field alone.
-- Sections whose heading starts with `## Open questions` or `## Needs confirmation` (`## 열린 질문`, `## 확인 필요`)
-  are cut before the file goes to the reviewer. All other text goes to the reviewer as is.
+- `- Scope:` (or `- 범위:`) — comma-separated globs. `**/` is zero or more whole folders, a trailing `**` is anything
+  below, `*` stays within one folder. Which principle's scope a changed file falls in is counted from this field
+  alone.
+- Sections whose heading starts with `Open questions` or `Needs confirmation` (`열린 질문`, `확인 필요`) are cut
+  before the file goes to the reviewer — up to the next heading of the same level or higher. All other text goes
+  to the reviewer as is. A `#` line inside a ``` fence is not a heading.
 
 ## Field by field
 

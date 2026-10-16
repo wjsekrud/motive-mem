@@ -137,13 +137,13 @@ Filter with the four tests above. Then:
 ### 3. Measure scope
 
 Scope is a hint to the reviewer: "if this file changed, look at this principle". A scope that covers nearly every file
-says nothing. Count the way the mode reads globs — `**` and `**/` are `.*` (so `src/**/*.py` also matches files
-directly in `src/`), `*` is `[^/]*`, `?` is one character, anchored with `^` and `$`. Braces like `{a,b}` are not
-supported — list the globs separately.
+says nothing. Count the way the mode reads globs — `**/` is zero or more whole folders, `(.*/)?` (so `src/**/*.py`
+also matches files directly in `src/`), a trailing `**` is `.*`, `*` is `[^/]*`, `?` is one character, anchored with
+`^` and `$`. Braces like `{a,b}` are not supported — list the globs separately.
 
 ```sh
 git ls-files | grep -cE '^src/core/.*$'          # src/core/**
-git ls-files | grep -cE '^src/.*\.py$'           # src/**/*.py
+git ls-files | grep -cE '^src/(.*/)?[^/]*\.py$'  # src/**/*.py
 git ls-files | grep -cE '^src/[^/]*\.py$'        # src/*.py
 ```
 

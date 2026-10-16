@@ -28,6 +28,7 @@ export type Words = {
     violations: (n: number) => string
     suspects: (n: number) => string
     unstated: (n: number) => string
+    snapshotFailed: (why: string) => string
   }
   panel: {
     header: (origin: string, nth: number, count: number) => string
@@ -72,6 +73,8 @@ export type Words = {
   }
   docsChangedToast: (docs: string) => string
   unreadable: (text: string) => string
+  interrupted: string
+  notSaved: (error: string) => string
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
@@ -102,6 +105,7 @@ const en: Words = {
     violations: n => plural(n, 'violation'),
     suspects: n => plural(n, 'suspect'),
     unstated: n => `${n} not in report`,
+    snapshotFailed: why => `could not snapshot the work tree, this turn is not reviewed (${why})`,
   },
   panel: {
     header: (origin, nth, count) => `${origin} review ${nth}/${count}`,
@@ -153,6 +157,8 @@ const en: Words = {
   },
   docsChangedToast: docs => `Principle docs changed: ${docs}`,
   unreadable: text => `could not read the answer: ${text}`,
+  interrupted: `stopped before it finished — review it again`,
+  notSaved: error => `Could not save the approval: ${error}`,
 }
 
 const ko: Words = {
@@ -181,6 +187,7 @@ const ko: Words = {
     violations: n => `위반 ${n}`,
     suspects: n => `의심 ${n}`,
     unstated: n => `보고 밖 ${n}`,
+    snapshotFailed: why => `작업 트리를 찍지 못해 이번 턴은 리뷰하지 않음 (${why})`,
   },
   panel: {
     header: (origin, nth, count) => `${origin} 리뷰 ${nth}/${count}`,
@@ -232,6 +239,8 @@ const ko: Words = {
   },
   docsChangedToast: docs => `원칙 문서가 바뀌었습니다: ${docs}`,
   unreadable: text => `답을 읽지 못함: ${text}`,
+  interrupted: `끝나기 전에 멈춤 — 다시 검토할 것`,
+  notSaved: error => `예외 승인을 저장하지 못했습니다: ${error}`,
 }
 
 export const WORDS: Record<Lang, Words> = { en, ko }

@@ -19,7 +19,13 @@ export const PRINCIPLES_PATH = '.claude/principles.md'
 
 const HASH_COMMENT = /\.(py|ps1|psm1|sh|toml|ya?ml|cfg|ini|spec)$/i
 const SLASH_COMMENT = /\.(m?[jt]sx?|c[jt]s|css|scss|c|h|cpp|hpp|cs|java|go|rs|swift|kt)$/i
+const CSS = /\.(css|scss)$/i
 const DOCS = /\.(md|txt|rst)$/i
+// Text files the build reads — a change to them is not a docs change
+const BUILD_TEXT = /(^|\/)(requirements[^/]*|constraints[^/]*|CMakeLists)\.txt$/i
+// Comments the toolchain reads: silencing a check or switching a build flag is not a comment-only change
+const DIRECTIVE =
+  /^(#!|\/\/\/|\/\/\s*(go:|\+build))|@ts-|eslint|prettier-ignore|istanbul ignore|c8 ignore|noqa|type:|pylint|mypy|pyright|nolint|clang-format|pragma|-\*-|#requires/i
 export const BINARY =
   /\.(png|jpe?g|gif|webp|bmp|ico|pdf|ttf|otf|woff2?|pbf|mvt|zip|7z|gz|exe|dll|pyd|so|sqlite|db|bin|npy|npz)$/i
 const TEST = /(^|\/)(tests?\/|test_[^/]*$|[^/]*_test\.[^/]+$|[^/]*\.test\.[^/]+$)/i
@@ -33,10 +39,27 @@ export function isPrincipleDoc(path: string): boolean {
 // The scope field, in either language the skill writes: `- Scope:` or `- 범위:`
 const SCOPE = /^\s*[-*]\s*(?:scope|범위)\s*:\s*(.+)$/i
 
+// The lines of a markdown file, each with whether it sits inside a ``` or ~~~ fence (a `#` there is not a heading)
+function markdownLines(text: string): { line: string; isFenced: boolean }[] {
+  let fence = ''
+  return text
+    .replace(/^﻿/, '')
+    .split(/\r?\n/)
+    .map(line => {
+      const mark = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]
+      if (mark !== undefined && (fence === '' || mark.startsWith(fence))) {
+        fence = fence === '' ? mark : ''
+        return { line, isFenced: true }
+      }
+      return { line, isFenced: fence !== '' }
+    })
+}
+
 export function parsePrinciples(text: string): Principle[] {
   const out: Principle[] = []
   let current: Principle | undefined
-  for (const line of text.split(/\r?\n/)) {
+  for (const { line, isFenced } of markdownLines(text)) {
+    if (isFenced) continue
     const head = /^##\s+([A-Z]\d{1,3})\s+(.+?)\s*$/.exec(line)
     if (head) {
       current = { id: head[1] ?? '', title: head[2] ?? '', scope: [] }
@@ -62,14 +85,19 @@ export function parsePrinciples(text: string): Principle[] {
 
 // Sections for people to settle among themselves — kept from the reviewer so an unanswered question
 // never becomes a criterion
-const NOT_FOR_REVIEWER = /^##\s+(open questions|needs confirmation|열린 질문|확인 필요)/i
+// — at any heading level, until the next heading of the same level or higher
+const NOT_FOR_REVIEWER = /^(#{1,6})\s+[*_]*\s*(open questions|needs confirmation|열린\s*질문|확인\s*필요)/i
 
 export function forReviewer(text: string): string {
   const out: string[] = []
-  let skipping = false
-  for (const line of text.split(/\r?\n/)) {
-    if (/^#{1,2}\s/.test(line)) skipping = NOT_FOR_REVIEWER.test(line)
-    if (!skipping) out.push(line)
+  let cutLevel = 0
+  for (const { line, isFenced } of markdownLines(text)) {
+    const level = isFenced ? 0 : (/^(#{1,6})\s/.exec(line)?.[1]?.length ?? 0)
+    if (level > 0) {
+      if (cutLevel > 0 && level <= cutLevel) cutLevel = 0
+      if (cutLevel === 0 && NOT_FOR_REVIEWER.test(line)) cutLevel = level
+    }
+    if (cutLevel === 0) out.push(line)
   }
   return out.join('\n')
 }
@@ -79,8 +107,14 @@ export function globToRegExp(glob: string): RegExp {
   for (let i = 0; i < glob.length; i++) {
     const c = glob.charAt(i)
     if (c === '*' && glob[i + 1] === '*') {
-      source += '.*'
-      i += glob[i + 2] === '/' ? 2 : 1
+      // `**/` is zero or more whole folders; a trailing `**` is anything below
+      if (glob[i + 2] === '/') {
+        source += '(?:.*/)?'
+        i += 2
+      } else {
+        source += '.*'
+        i += 1
+      }
     } else if (c === '*') {
       source += '[^/]*'
     } else if (c === '?') {
@@ -111,21 +145,33 @@ function headerPath(raw: string, prefix: string): string {
   return path.startsWith(prefix) ? path.slice(prefix.length) : path
 }
 
-export function kindOf(path: string, changed: string[], isBinary: boolean): FileKind {
-  if (isPrincipleDoc(path)) return 'principles'
+// A changed line that is only a comment. Leaning towards "no": a comment wrongly taken for code costs one review,
+// code wrongly taken for a comment skips the review.
+function isCommentLine(path: string, line: string): boolean {
+  if (DIRECTIVE.test(line)) return false
+  if (HASH_COMMENT.test(path)) return line.startsWith('#')
+  if (!SLASH_COMMENT.test(path)) return false
+  if (line.startsWith('//')) return true
+  // `/* … */ code` is code
+  if (line.startsWith('/*')) return !/\*\/\s*\S/.test(line)
+  // A block's middle or end line: `* text`, `*`, `*/` — not `*ptr = 1` or a CSS `* {`
+  return /^\*(\s|\/|$)/.test(line) && !(CSS.test(path) && /[{};]/.test(line))
+}
+
+export function kindOf(
+  path: string,
+  changed: string[],
+  isBinary: boolean,
+  more: { from?: string; wrapsCode?: boolean } = {},
+): FileKind {
+  if (isPrincipleDoc(path) || (more.from !== undefined && isPrincipleDoc(more.from))) return 'principles'
   if (isBinary || BINARY.test(path)) return 'binary'
-  if (DOCS.test(path)) return 'docs'
+  if (DOCS.test(path) && !BUILD_TEXT.test(path)) return 'docs'
   if (TEST.test(path)) return 'test'
-  const markers = HASH_COMMENT.test(path)
-    ? ['#']
-    : SLASH_COMMENT.test(path)
-      ? ['//', '/*', '*']
-      : undefined
-  if (markers) {
-    const body = changed.map(line => line.slice(1).trim()).filter(line => line !== '')
-    if (body.every(line => markers.some(marker => line.startsWith(marker)))) return 'comment'
-  }
-  return 'code'
+  const body = changed.map(line => line.slice(1).trim()).filter(line => line !== '')
+  // No changed lines (a rename, a mode change) or a block comment opened around unchanged lines: code
+  if (body.length === 0 || (more.wrapsCode && SLASH_COMMENT.test(path))) return 'code'
+  return body.every(line => isCommentLine(path, line)) ? 'comment' : 'code'
 }
 
 export function parseDiff(diff: string): FileChange[] {
@@ -141,6 +187,10 @@ export function parseDiff(diff: string): FileChange[] {
     let added = 0
     let removed = 0
     const changed: string[] = []
+    // A block comment a changed line opens (`/*` with no `*/` after it) that is still open at an unchanged line
+    // comments that code out — or, on the `-` side, back in
+    const open = { '+': false, '-': false }
+    let wrapsCode = false
     for (const line of lines.slice(1)) {
       if (!isInHunk) {
         if (line.startsWith('--- ')) from = headerPath(line.slice(4), 'a/')
@@ -155,18 +205,28 @@ export function parseDiff(diff: string): FileChange[] {
         else if (line.startsWith('@@')) isInHunk = true
         continue
       }
-      if (line.startsWith('@@')) continue
-      if (line.startsWith('+')) {
-        added++
+      if (line.startsWith('@@')) {
+        if (open['+'] || open['-']) wrapsCode = true
+        open['+'] = open['-'] = false
+        continue
+      }
+      const sign = line.charAt(0)
+      if (sign === '+' || sign === '-') {
+        if (sign === '+') added++
+        else removed++
         changed.push(line)
-      } else if (line.startsWith('-')) {
-        removed++
-        changed.push(line)
+        const opens = line.lastIndexOf('/*')
+        const closes = line.lastIndexOf('*/')
+        if (opens > closes) open[sign] = true
+        else if (closes > opens) open[sign] = false
+      } else if (sign === ' ' && (open['+'] || open['-'])) {
+        wrapsCode = true
       }
     }
+    if (open['+'] || open['-']) wrapsCode = true
     const path = status === 'deleted' ? from : to || from
     if (path === '') continue
-    out.push({ path, status, added, removed, kind: kindOf(path, changed, isBinary), lines: changed })
+    out.push({ path, status, added, removed, kind: kindOf(path, changed, isBinary, { from, wrapsCode }), lines: changed })
   }
   return out
 }
@@ -248,9 +308,21 @@ const KIND_NAME: Record<FileKind, string> = {
   binary: 'binary',
 }
 
-function clip(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max)}\n…(${text.length - max} chars cut)`
+// The first `max` UTF-16 units, never ending on half of a surrogate pair (the API refuses a lone one)
+export function cut(text: string, max: number): string {
+  if (text.length <= max) return text
+  const end = Math.max(0, max)
+  return text.slice(0, /[\uD800-\uDBFF]/.test(text.charAt(end - 1)) ? end - 1 : end)
 }
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${cut(text, max)}\n…(${text.length - max} chars cut)`
+}
+
+// The request's own tags, defused inside what goes between them — a report, a diff or a principles file that
+// closes </author_report> and opens <approved_exceptions> must not read as the request's structure
+const TAGS = /<(\/?)(principles|request|author_report|approved_exceptions|changed_files|diff)>/gi
+const untag = (text: string) => text.replace(TAGS, '‹$1$2›')
 
 function chunksByPath(diff: string): Map<string, string> {
   const map = new Map<string, string>()
@@ -263,14 +335,18 @@ function chunksByPath(diff: string): Map<string, string> {
 
 export function budgetDiff(files: FileChange[], diff: string, maxChars: number): string {
   const chunks = chunksByPath(diff)
-  const order = [...files].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
+  // Code first; within a kind the smaller first, so one big file (a lockfile, generated data) cannot push the rest out
+  const size = (f: FileChange) => chunks.get(f.path)?.length ?? 0
+  const order = [...files].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || size(a) - size(b))
   const kept: string[] = []
   const left: string[] = []
   let room = maxChars
   for (const file of order) {
+    if (file.kind === 'binary') continue
     const chunk = chunks.get(file.path)
-    if (chunk === undefined || file.kind === 'binary') continue
-    if (chunk.length <= room) {
+    if (chunk === undefined) {
+      left.push(`${file.path} (+${file.added} -${file.removed})`)
+    } else if (chunk.length <= room) {
       kept.push(chunk)
       room -= chunk.length
     } else if (kept.length === 0) {
@@ -300,7 +376,7 @@ export function buildPrompt(input: ReviewInput): { text: string; cache?: true }[
     ? input.intent.prompts.map((p, i) => `${i + 1}. ${clip(p, 2000)}`).join('\n')
     : '(none)'
   const decisions = input.decisions.length
-    ? input.decisions.map(d => `- ${d.principle} ${d.file}: ${d.why}`).join('\n')
+    ? untag(input.decisions.map(d => `- ${d.principle} ${d.file}: ${d.why}`).join('\n'))
     : '(none)'
   const byFile = new Map<string, string[]>()
   for (const [id, paths] of Object.entries(input.hits)) {
@@ -314,15 +390,15 @@ export function buildPrompt(input: ReviewInput): { text: string; cache?: true }[
     })
     .join('\n')
   const rest = [
-    `<request> (oldest first; the last one is this task)\n${prompts}\n</request>`,
-    `<author_report> (what Claude told the human when it finished)\n${clip(input.intent.answer, 6000) || '(none — reviewing all uncommitted changes)'}\n</author_report>`,
+    `<request> (oldest first; the last one is this task)\n${untag(prompts)}\n</request>`,
+    `<author_report> (what Claude told the human when it finished)\n${untag(clip(input.intent.answer, 6000)) || (input.intent.isAll ? '(none — reviewing all uncommitted changes)' : '(none)')}\n</author_report>`,
     `<approved_exceptions> (the human already approved these as exceptions — do not raise the same thing again)\n${decisions}\n</approved_exceptions>`,
-    `<changed_files>\n${files}\n</changed_files>`,
-    `<diff>\n${budgetDiff(input.files, input.diff, input.maxDiffChars)}\n</diff>`,
+    `<changed_files>\n${untag(files)}\n</changed_files>`,
+    `<diff>\n${untag(budgetDiff(input.files, input.diff, input.maxDiffChars))}\n</diff>`,
     answerIn(input.lang),
   ].join('\n\n')
   return [
-    { text: `<principles>\n${forReviewer(input.principles)}\n</principles>`, cache: true },
+    { text: `<principles>\n${untag(forReviewer(input.principles))}\n</principles>`, cache: true },
     { text: rest },
   ]
 }
@@ -341,29 +417,32 @@ export function parseVerdict(text: string): Verdict | undefined {
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const o = raw as Record<string, unknown>
-  const str = (v: unknown) => (typeof v === 'string' ? v : '')
-  const strs = (v: unknown) =>
-    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : []
-  const findings: Finding[] = Array.isArray(o.findings)
-    ? o.findings.flatMap(item => {
-        if (typeof item !== 'object' || item === null) return []
-        const f = item as Record<string, unknown>
-        const why = str(f.why)
-        if (why === '') return []
-        const finding: Finding = {
-          principle: str(f.principle) || WORKAROUND,
-          severity: f.severity === 'violation' ? 'violation' : 'suspect',
-          file: str(f.file),
-          why,
-          evidence: str(f.evidence),
-        }
-        if (typeof f.line === 'number' && Number.isFinite(f.line)) finding.line = Math.round(f.line)
-        return [finding]
-      })
-    : []
+  // An answer that does not say match / partial / mismatch, or whose lists are not lists, is unreadable —
+  // never a clean pass
+  const intent = typeof o.intent === 'string' ? o.intent.trim().toLowerCase() : ''
+  if (intent !== 'match' && intent !== 'partial' && intent !== 'mismatch') return undefined
+  if (o.findings !== undefined && !Array.isArray(o.findings)) return undefined
+  // One line each: the panel shows these inside markdown
+  const str = (v: unknown) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '')
+  const strs = (v: unknown) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v : []).map(str).filter(Boolean)
+  const findings: Finding[] = (Array.isArray(o.findings) ? o.findings : []).flatMap(item => {
+    if (typeof item !== 'object' || item === null) return []
+    const f = item as Record<string, unknown>
+    const why = str(f.why) || str(f.reason) || str(f.description)
+    if (why === '') return []
+    const finding: Finding = {
+      principle: str(f.principle) || WORKAROUND,
+      severity: str(f.severity).toLowerCase() === 'violation' ? 'violation' : 'suspect',
+      file: str(f.file),
+      why,
+      evidence: str(f.evidence),
+    }
+    if (typeof f.line === 'number' && Number.isFinite(f.line)) finding.line = Math.round(f.line)
+    return [finding]
+  })
   return {
     summary: str(o.summary),
-    intent: o.intent === 'partial' || o.intent === 'mismatch' ? o.intent : 'match',
+    intent,
     intentNote: str(o.intent_note),
     findings,
     unstated: strs(o.unstated),
@@ -396,7 +475,7 @@ export function statusLine(review: Review, lang: Lang): string {
   const w = WORDS[lang]
   const s = w.status
   if (review.status === 'running') return `${w.title} · ${s.running}`
-  if (review.status === 'error') return `${w.title} · ${s.failed(review.error ?? '')}`.slice(0, 120)
+  if (review.status === 'error') return cut(`${w.title} · ${s.failed(review.error ?? '')}`.replace(/\s+/g, ' '), 120)
   if (review.status === 'skipped') {
     return review.principleDocs.length > 0
       ? `${w.title} · ${s.docsChanged(review.principleDocs.join(', '))}`
@@ -425,6 +504,12 @@ function where(f: Finding): string {
   return f.line === undefined ? f.file : `${f.file}:${f.line}`
 }
 
+// Inline code that holds backticks of its own
+function code(text: string): string {
+  const fence = '`'.repeat(Math.max(0, ...(text.match(/`+/g) ?? []).map(run => run.length)) + 1)
+  return fence.length > 1 ? `${fence} ${text} ${fence}` : `\`${text}\``
+}
+
 export function reviewMarkdown(review: Review, index: number, count: number, lang: Lang): string {
   const w = WORDS[lang]
   const p = w.panel
@@ -450,8 +535,8 @@ export function reviewMarkdown(review: Review, index: number, count: number, lan
       out.push('')
       out.push(`**${p.findings}**`)
       for (const { finding, index: i } of open) {
-        out.push(`${i + 1}. ${tag(finding, lang)} \`${where(finding)}\` — ${finding.why}`)
-        if (finding.evidence) out.push(`   \`${finding.evidence.slice(0, 160)}\``)
+        out.push(`${i + 1}. ${tag(finding, lang)} ${code(where(finding))} — ${finding.why}`)
+        if (finding.evidence) out.push(`   ${code(cut(finding.evidence, 160))}`)
       }
     }
     if (review.excepted.length > 0) out.push(`\n_${p.excepted(review.excepted.map(i => i + 1))}_`)
@@ -490,17 +575,46 @@ export function fixPrompt(review: Review, lang: Lang): string {
   for (const { finding, index } of openFindings(review)) {
     lines.push(`${index + 1}. ${tag(finding, lang)} ${where(finding)} — ${finding.why}`)
   }
-  if (v.intent !== 'match' && v.intentNote) lines.push(`- ${w.fix.intent}: ${v.intentNote}`)
+  if (v.intent !== 'match') lines.push(`- ${w.fix.intent}: ${v.intentNote || w.intent[v.intent]}`)
   for (const line of v.unstated) lines.push(`- ${w.fix.unstated}: ${line}`)
   return lines.join('\n')
 }
 
 // ---- logs that several sessions write (.git/motive-mem)
 
-// The log's text after adding one value, keeping the last `keep` lines
-export function appendedLog(text: string, value: unknown, keep: number): string {
+// $.fs refuses to read a file over 4 MiB, so a log stays well under it — even when every character takes 3 bytes
+export const LOG_MAX_CHARS = 1_000_000
+
+// The log's text after adding one value, keeping the last `keep` lines and no more than `maxChars`
+export function appendedLog(text: string, value: unknown, keep: number, maxChars = LOG_MAX_CHARS): string {
   const lines = [...text.split('\n').filter(Boolean), JSON.stringify(value)].slice(-keep)
+  let size = lines.reduce((sum, line) => sum + line.length + 1, 0)
+  while (lines.length > 1 && size > maxChars) size -= (lines.shift()?.length ?? 0) + 1
   return `${lines.join('\n')}\n`
+}
+
+// A review as the log keeps it: the request and the report clipped as the reviewer saw them, and only the new
+// files a retry would look at
+export function forLog(review: Review, freshLimit: number): Review {
+  return {
+    ...review,
+    range: { ...review.range, fresh: review.range.fresh.slice(0, freshLimit) },
+    intent: {
+      ...review.intent,
+      prompts: review.intent.prompts.map(p => cut(p, 2000)),
+      answer: cut(review.intent.answer, 6000),
+    },
+  }
+}
+
+// Reviews read back from the log: the last line of each id wins (a later approval rewrites one), in time order
+export function latestById(list: Review[], keep: number): Review[] {
+  const byId = new Map<string, Review>()
+  for (const review of list) {
+    byId.delete(review.id)
+    byId.set(review.id, review)
+  }
+  return [...byId.values()].sort((a, b) => a.at - b.at).slice(-keep)
 }
 
 // A lock other processes can see. register.tsx keeps it in a git ref that `update-ref` creates only when absent.
@@ -516,8 +630,10 @@ export type Lock = {
 export type Clock = { now: () => Promise<number>; sleep: (ms: number) => Promise<void> }
 
 // A holder that crashed leaves its lock behind; past `staleMs` it is broken. Past `waitMs` the work runs unlocked —
-// one log line at risk is better than a review or an approval that never gets written.
-export const LOCK_LIMITS = { staleMs: 10_000, waitMs: 15_000, stepMs: 50 }
+// one log line at risk is better than a review or an approval that never gets written. (A lock that fails while
+// nobody holds it — a leftover ref lockfile, a read-only repository — also ends there. It is not given up sooner:
+// under contention "free but not taken" is just someone else's turn, and giving up then loses lines.)
+export const LOCK_LIMITS = { staleMs: 5_000, waitMs: 8_000, stepMs: 50 }
 
 const stampTime = (stamp: string) => Number(stamp.split(' ').at(-1))
 
