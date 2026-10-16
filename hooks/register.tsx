@@ -11,9 +11,11 @@ import type { Decision, FileChange, Intent, Review } from '../types'
 import {
   BINARY,
   PRINCIPLES_PATH,
+  appendedLog,
   buildPrompt,
   fixPrompt,
   hasIssues,
+  inOrder,
   levelOf,
   openFindings,
   parseDiff,
@@ -25,6 +27,8 @@ import {
   statusLine,
   systemPrompt,
   untrackedChunk,
+  withLock,
+  type Lock,
 } from './core'
 import { WORDS, langOf, type Lang } from './text'
 
@@ -43,8 +47,8 @@ const isPaused = atom({ plugin: 'motive-mem', key: 'isPaused' } as const, false)
 
 // ---- git
 
-async function git($: Engine, repo: string, args: string[], timeoutMs = 30_000) {
-  return $.process.run(['git', '-c', 'core.quotepath=off', '-C', repo, ...args], { timeoutMs })
+async function git($: Engine, repo: string, args: string[], stdin?: string) {
+  return $.process.run(['git', '-c', 'core.quotepath=off', '-C', repo, ...args], { timeoutMs: 30_000, stdin })
 }
 
 async function gitRepo($: Engine): Promise<Repo | undefined> {
@@ -124,10 +128,42 @@ async function readLines<T>($: Engine, path: string, limit: number): Promise<T[]
     })
 }
 
-async function appendLine($: Engine, path: string, value: unknown, keep: number) {
-  const text = await $.fs.read(path).catch(() => '')
-  const lines = [...text.split('\n').filter(Boolean), JSON.stringify(value)].slice(-keep)
-  await $.fs.write(path, `${lines.join('\n')}\n`)
+// Sessions in the same repository share these logs, and $.fs only reads and writes whole files. So a write holds
+// a git ref as the lock: `update-ref <ref> <id> ''` creates it only while it is absent, which git decides
+// atomically across processes. The ref points at a blob holding who took it and when (gc drops it afterwards).
+const LOCK_REF = 'refs/motive-mem/lock'
+const owner = Math.random().toString(36).slice(2)
+const oneAtATime = inOrder()
+
+function gitLock($: Engine, repo: Repo): Lock {
+  return {
+    take: async stamp => {
+      const blob = await git($, repo.top, ['hash-object', '-w', '--stdin'], stamp)
+      const id = blob.stdout.trim()
+      if (blob.exitCode !== 0 || id === '') return undefined
+      const made = await git($, repo.top, ['update-ref', LOCK_REF, id, ''])
+      return made.exitCode === 0 ? id : undefined
+    },
+    peek: async () => {
+      const out = await git($, repo.top, ['cat-file', '--batch'], `${LOCK_REF}\n`)
+      const [head = '', ...body] = out.stdout.split('\n')
+      const [id, type] = head.split(' ')
+      return out.exitCode === 0 && type === 'blob' && id ? { id, stamp: body.join('\n').trim() } : undefined
+    },
+    drop: async id => {
+      await git($, repo.top, ['update-ref', '-d', LOCK_REF, id])
+    },
+  }
+}
+
+async function appendLine($: Engine, repo: Repo, path: string, value: unknown, keep: number) {
+  const clock = { now: () => $.clock.now(), sleep: (ms: number) => $.clock.sleep(ms) }
+  await oneAtATime(() =>
+    withLock(gitLock($, repo), clock, owner, async () => {
+      const text = await $.fs.read(path).catch(() => '')
+      await $.fs.write(path, appendedLog(text, value, keep))
+    }),
+  )
 }
 
 const reviewLog = (repo: Repo) => `${repo.gitDir}/motive-mem/reviews.jsonl`
@@ -202,7 +238,7 @@ async function review(
     $.ui.toast(words().docsChangedToast(draft.principleDocs.join(', ')))
   }
   if (draft.status === 'skipped') {
-    await appendLine($, reviewLog(repo), draft, 500)
+    await appendLine($, repo, reviewLog(repo), draft, 500)
     return
   }
 
@@ -236,7 +272,7 @@ async function review(
   }
   await replace($, done)
   $.ui.status(statusLine(done, config.lang))
-  await appendLine($, reviewLog(repo), done, 500)
+  await appendLine($, repo, reviewLog(repo), done, 500)
   if (hasIssues(done)) {
     const first = openFindings(done)[0]?.finding
     $.ui.toast(
@@ -420,7 +456,7 @@ export const register: Register = (on, options) => {
                     file: finding.file,
                     why: finding.why,
                   }
-                  await appendLine($, decisionLog(repo), decision, 200)
+                  await appendLine($, repo, decisionLog(repo), decision, 200)
                   const updated = { ...shown, excepted: [...shown.excepted, i] }
                   await replace($, updated)
                   $.ui.status(statusLine(updated, config.lang))

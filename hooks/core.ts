@@ -1,5 +1,6 @@
 // The pure part of intent review: reading the principles doc, splitting the diff, building the review
-// request, reading the answer, and the panel text. No `$` here, so `claude plugin test` checks it as is.
+// request, reading the answer, the panel text, and the locking of the shared logs (given a lock and a clock).
+// No `$` here, so `claude plugin test` checks it as is.
 
 import type {
   Decision,
@@ -492,4 +493,68 @@ export function fixPrompt(review: Review, lang: Lang): string {
   if (v.intent !== 'match' && v.intentNote) lines.push(`- ${w.fix.intent}: ${v.intentNote}`)
   for (const line of v.unstated) lines.push(`- ${w.fix.unstated}: ${line}`)
   return lines.join('\n')
+}
+
+// ---- logs that several sessions write (.git/motive-mem)
+
+// The log's text after adding one value, keeping the last `keep` lines
+export function appendedLog(text: string, value: unknown, keep: number): string {
+  const lines = [...text.split('\n').filter(Boolean), JSON.stringify(value)].slice(-keep)
+  return `${lines.join('\n')}\n`
+}
+
+// A lock other processes can see. register.tsx keeps it in a git ref that `update-ref` creates only when absent.
+export type Lock = {
+  // Takes the lock if it is free: the id to drop it by, or undefined when someone else holds it (or it failed)
+  take: (stamp: string) => Promise<string | undefined>
+  // Who holds it: the stamp they took it with and its id, or undefined when free
+  peek: () => Promise<{ id: string; stamp: string } | undefined>
+  // Drops the lock only while it is still `id`
+  drop: (id: string) => Promise<void>
+}
+
+export type Clock = { now: () => Promise<number>; sleep: (ms: number) => Promise<void> }
+
+// A holder that crashed leaves its lock behind; past `staleMs` it is broken. Past `waitMs` the work runs unlocked —
+// one log line at risk is better than a review or an approval that never gets written.
+export const LOCK_LIMITS = { staleMs: 10_000, waitMs: 15_000, stepMs: 50 }
+
+const stampTime = (stamp: string) => Number(stamp.split(' ').at(-1))
+
+export async function withLock<T>(
+  lock: Lock,
+  clock: Clock,
+  owner: string,
+  work: () => Promise<T>,
+  limits = LOCK_LIMITS,
+): Promise<T> {
+  const start = await clock.now()
+  let held: string | undefined
+  for (;;) {
+    held = await lock.take(`${owner} ${await clock.now()}`).catch(() => undefined)
+    if (held !== undefined) break
+    const now = await clock.now()
+    if (now - start >= limits.waitMs) break
+    const holder = await lock.peek().catch(() => undefined)
+    // An unreadable stamp is NaN, which never counts as fresh
+    if (holder !== undefined && !(now - stampTime(holder.stamp) < limits.staleMs)) {
+      await lock.drop(holder.id).catch(() => undefined)
+    }
+    await clock.sleep(limits.stepMs)
+  }
+  try {
+    return await work()
+  } finally {
+    if (held !== undefined) await lock.drop(held).catch(() => undefined)
+  }
+}
+
+// Runs the work it is given one at a time, in the order given — a session's own writes never interleave
+export function inOrder(): <T>(work: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve()
+  return work => {
+    const run = tail.then(work)
+    tail = run.catch(() => undefined)
+    return run
+  }
 }

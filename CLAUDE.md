@@ -33,6 +33,8 @@ npx -p typescript tsc -p tsconfig.json --noEmit
 - Anything that involves judgment goes in `core.ts`, with a test. `register.tsx` only calls the engine and git.
 - The state keys, command name, panel id and log folder (`.git/motive-mem/`) all equal the plugin name. Rename them
   together.
+- Every session in a repository shares its logs in `.git/motive-mem/`. Write them only through `appendLine`, which
+  holds the git ref `refs/motive-mem/lock` (`withLock` in core.ts) — a plain read-then-write loses lines.
 - A new user-facing string goes in `hooks/text.ts` in both languages — `Words` makes a missing one a type error.
 - The review request (system prompt, tags, file list) stays in English whatever the language; only the sentences of
   the answer follow `language`.

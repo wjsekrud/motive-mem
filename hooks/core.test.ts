@@ -8,6 +8,7 @@ import {
   forReviewer,
   globToRegExp,
   hasIssues,
+  inOrder,
   levelOf,
   parseDiff,
   parsePrinciples,
@@ -17,6 +18,8 @@ import {
   statusLine,
   systemPrompt,
   untrackedChunk,
+  withLock,
+  type Lock,
 } from './core'
 
 const PRINCIPLES = `# Principles
@@ -296,5 +299,107 @@ describe('panel', () => {
       expect(await ui.find({ key: 'all' })).toBeDefined()
       await ui.unmount()
     }
+  })
+})
+
+// A file system whose reads and writes take a moment, so two writers interleave, and a lock kept in memory with
+// the same rules as the git ref: created only when absent, dropped only by its id.
+function world(now = 0) {
+  const files: Record<string, string> = {}
+  let held: { id: string; stamp: string } | undefined
+  let taken = 0
+  const tick = () => Promise.resolve()
+  const lock: Lock = {
+    take: async stamp => {
+      await tick()
+      if (held !== undefined) return undefined
+      held = { id: `id${++taken}`, stamp }
+      return held.id
+    },
+    peek: async () => held,
+    drop: async id => {
+      if (held?.id === id) held = undefined
+    },
+  }
+  const clock = {
+    now: async () => now,
+    sleep: async (ms: number) => {
+      now += ms
+      await tick()
+    },
+  }
+  const append = async (path: string, line: string) => {
+    await tick()
+    const text = files[path] ?? ''
+    await tick()
+    files[path] = text + `${line}\n`
+  }
+  return {
+    files,
+    lock,
+    clock,
+    append,
+    hold: (stamp: string) => (held = { id: 'other', stamp }),
+    holder: () => held,
+  }
+}
+
+const QUICK = { staleMs: 10_000, waitMs: 15_000, stepMs: 50 }
+
+describe('shared logs', () => {
+  test('two sessions approving exceptions at once keep both records', async () => {
+    const plain = world()
+    await Promise.all([plain.append('d', 'a'), plain.append('d', 'b')])
+    expect(plain.files.d?.trim().split('\n').length).toBe(1) // unlocked, one is lost: the fake really interleaves
+
+    const w = world()
+    await Promise.all([
+      withLock(w.lock, w.clock, 'one', () => w.append('d', 'a'), QUICK),
+      withLock(w.lock, w.clock, 'two', () => w.append('d', 'b'), QUICK),
+    ])
+    expect(w.files.d?.trim().split('\n').sort()).toEqual(['a', 'b'])
+    expect(w.holder()).toBeUndefined()
+  })
+
+  test('completed reviews from many sessions all land, and the lock is let go', async () => {
+    const w = world()
+    const names = Array.from({ length: 8 }, (_, i) => `r${i}`)
+    await Promise.all(names.map(n => withLock(w.lock, w.clock, n, () => w.append('reviews', n), QUICK)))
+    expect(w.files.reviews?.trim().split('\n').sort()).toEqual(names)
+    expect(w.holder()).toBeUndefined()
+  })
+
+  test('a live holder is waited for; a stale one is broken', async () => {
+    const live = world(100_000)
+    live.hold('other 99000')
+    const order: string[] = []
+    const waiting = withLock(live.lock, live.clock, 'me', async () => void order.push('mine'), QUICK)
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(order).toEqual([]) // still held, about a second old
+    await live.lock.drop('other')
+    await waiting
+    expect(order).toEqual(['mine'])
+
+    const stale = world(100_000)
+    stale.hold('crashed 50000')
+    let ran = false
+    await withLock(stale.lock, stale.clock, 'me', async () => void (ran = true), QUICK)
+    expect(ran).toBe(true)
+    expect(stale.holder()).toBeUndefined()
+  })
+
+  test('when the lock cannot be had, the write still happens after the wait', async () => {
+    const w = world()
+    const broken: Lock = { take: async () => undefined, peek: async () => undefined, drop: async () => undefined }
+    let ran = false
+    await withLock(broken, w.clock, 'me', async () => void (ran = true), { staleMs: 10_000, waitMs: 200, stepMs: 50 })
+    expect(ran).toBe(true)
+  })
+
+  test("a session's own writes run one at a time, in order", async () => {
+    const w = world()
+    const queue = inOrder()
+    await Promise.all(['a', 'b', 'c'].map(n => queue(() => w.append('own', n))))
+    expect(w.files.own).toBe('a\nb\nc\n')
   })
 })
