@@ -77,8 +77,8 @@ Not principles:
 - Find the repository root with `git rev-parse --show-toplevel`. If it is not a repository, stop — the mode only runs
   in git repositories.
 - If `.claude/principles.md` already exists, this is a **revision** (section below). If not, **first creation**.
-- If `.git/motive-mem/` holds `reviews.jsonl` or `decisions.jsonl`, the mode has run here. Those are the best evidence
-  for a revision.
+- If a `motive-mem/` folder is in the repository's git folders (`git rev-parse --git-common-dir`, and in a linked work
+  tree also `--absolute-git-dir`), the mode has run here. Its logs are the best evidence for a revision.
 - Pick the language — for the file and for the table in step 5: the one the people working in the repository use
   (its CLAUDE.md and docs are a good guide). The mode reads field and section names in English or Korean; see
   `references/format.md`.
@@ -201,8 +201,8 @@ Tell the person:
 
 - The mode turns on in this repository from the next session (it turns on when the file exists). To see it right
   away: `/motive-mem all`.
-- Wrong findings go through "approve as exception" in the panel — they land in `decisions.jsonl` and are not raised
-  again. When the same exception piles up, come back to this skill to promote it to an `Exx` or narrow the scope.
+- Wrong findings go through "approve as exception" in the panel — they land in the mode's decisions log and are not
+  raised again. When the same exception piles up, come back to this skill to promote it to an `Exx` or narrow the scope.
 - The person commits.
 
 ## Revising (when the file already exists)
@@ -210,14 +210,23 @@ Tell the person:
 Don't rewrite it. The existing principles are ones the person confirmed. Gather evidence and propose **only the lines
 to change**.
 
-The mode's logs are the best evidence (`.git/motive-mem/`, one JSON object per line):
+The mode's logs are the best evidence. Each is a folder of `.json` files, one JSON object each, named so they sort
+oldest first (an empty file is a record the mode cleared to keep only the last 200 — skip it; it is not a withdrawn
+approval). A log from before version 0.1.2 is a `.jsonl` file of the same name beside the folder (`decisions.jsonl`,
+`reviews.jsonl`), one object per line, all older than the folder's records — read both as one log. Run the
+`git rev-parse` commands below from the repository root.
 
-- `decisions.jsonl` — findings the person approved as exceptions, `{principle, file, why}`. Exceptions piling up on one
-  principle mean the scope is too wide, an exception `Exx` is missing, or the rule sentence is stronger than reality.
-  Narrow it or add the exception.
-- `reviews.jsonl` — per review, `verdict.findings[].principle` and `excepted` (the numbers of findings made
-  exceptions). A principle that was flagged and not made an exception is one that actually bit — leave it. A principle
-  that never produced a finding may just not have been touched — that alone is no reason to drop it.
+- `decisions/` (under `git rev-parse --git-common-dir`/`motive-mem`) — findings the person approved as exceptions,
+  `{at, principle, file, why}`; `why` is the finding's reason as the reviewer gave it. Count exceptions here. Exceptions
+  piling up on one principle mean the scope is too wide, an exception `Exx` is missing, or the rule sentence is
+  stronger than reality. Narrow it or add the exception.
+- `reviews/` (under `git rev-parse --absolute-git-dir`/`motive-mem` — each work tree has its own; read every work
+  tree's, the others under `<common dir>/worktrees/<name>/motive-mem/reviews`) — a record when a review ends and one
+  more with each approval, all with the review's `id`. Per review: `verdict.findings[].principle`, and `excepted`, the
+  0-based indices of findings made exceptions — take the union over that `id`'s records. An approval is in both logs,
+  so don't count it again here. A principle that was flagged and not made an
+  exception is one that actually bit — leave it. A principle that never produced a finding may just not have been
+  touched — that alone is no reason to drop it.
 - What remains in `## Open questions` — ask whether they have been answered since.
 - Correction records since the principles file last changed (`git log --since`, or after that commit) — candidates
   for new principles.

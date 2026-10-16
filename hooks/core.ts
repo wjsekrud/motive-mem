@@ -582,15 +582,74 @@ export function fixPrompt(review: Review, lang: Lang): string {
 
 // ---- logs that several sessions write (.git/motive-mem)
 
-// $.fs refuses to read a file over 4 MiB, so a log stays well under it — even when every character takes 3 bytes
-export const LOG_MAX_CHARS = 1_000_000
+// Each write to a log is a file of its own — a record — and no record is ever written twice with content, so a
+// session cannot overwrite what another wrote, however their steps interleave or pause. There is no lock to wait
+// for, break or give up on. register.tsx passes $.fs in; the tests pass one that pauses.
+export type LogFs = {
+  list: (dir: string) => Promise<{ name: string; size: number }[]>
+  read: (path: string) => Promise<string>
+  write: (path: string, text: string) => Promise<void>
+}
 
-// The log's text after adding one value, keeping the last `keep` lines and no more than `maxChars`
-export function appendedLog(text: string, value: unknown, keep: number, maxChars = LOG_MAX_CHARS): string {
-  const lines = [...text.split('\n').filter(Boolean), JSON.stringify(value)].slice(-keep)
-  let size = lines.reduce((sum, line) => sum + line.length + 1, 0)
-  while (lines.length > 1 && size > maxChars) size -= (lines.shift()?.length ?? 0) + 1
-  return `${lines.join('\n')}\n`
+// <time>-<session>-<n>.json: names sort in time order and no two sessions make the same one
+const RECORD = /^\d{15}-[0-9a-z]+-\d+\.json$/
+
+export function recordName(at: number, owner: string, n: number): string {
+  return `${String(Math.max(0, Math.floor(at))).padStart(15, '0')}-${owner}-${n}.json`
+}
+
+// The records a log holds, oldest first. An empty one has been trimmed (or is still being written).
+function liveRecords(entries: { name: string; size: number }[]): string[] {
+  return entries
+    .filter(e => RECORD.test(e.name) && e.size > 0)
+    .map(e => e.name)
+    .sort()
+}
+
+// Writes one record; a failure rejects, so the caller can say it was not saved. Then trims the log to its last
+// `keep` records by emptying the older ones — $.fs cannot delete, and emptying writes the same thing whoever does
+// it, so two sessions trimming at once agree. A failed trim leaves the record saved.
+export async function writeRecord(fs: LogFs, dir: string, name: string, value: unknown, keep: number) {
+  await fs.write(`${dir}/${name}`, JSON.stringify(value))
+  try {
+    const live = liveRecords(await fs.list(dir))
+    for (const old of live.slice(0, Math.max(0, live.length - keep))) await fs.write(`${dir}/${old}`, '')
+  } catch {
+    // the next write trims
+  }
+}
+
+// The last `limit` values of a log, oldest first. The JSON-lines files the logs used to be (`legacy`) are read
+// only while the records fall short of `limit`. A record cut short or not yet written is skipped.
+export async function readRecords<T>(fs: LogFs, dir: string, legacy: string[], limit: number): Promise<T[]> {
+  const parse = (text: string): T[] => {
+    try {
+      return [JSON.parse(text) as T]
+    } catch {
+      return []
+    }
+  }
+  const names = liveRecords(await fs.list(dir).catch(() => [])).slice(-limit)
+  const records = (await Promise.all(names.map(name => fs.read(`${dir}/${name}`).catch(() => '')))).flatMap(parse)
+  if (records.length >= limit) return records
+  const old: T[] = []
+  for (const path of legacy) {
+    const text = await fs.read(path).catch(() => '')
+    old.push(...text.split('\n').filter(Boolean).flatMap(parse))
+  }
+  return [...old, ...records].slice(-limit)
+}
+
+// A path git printed relative to `base` (`../.git`), made absolute and without `.` or `..`; an absolute one as given
+export function resolvePath(base: string, path: string): string {
+  if (/^([a-z]:)?[\\/]/i.test(path)) return path
+  const parts = `${base}/${path}`.replace(/\\/g, '/').split('/')
+  const out: string[] = []
+  for (const part of parts) {
+    if (part === '..' && out.length > 1) out.pop()
+    else if (part !== '.' && (part !== '' || out.length === 0)) out.push(part)
+  }
+  return out.join('/')
 }
 
 // A review as the log keeps it: the request and the report clipped as the reviewer saw them, and only the new
@@ -607,70 +666,15 @@ export function forLog(review: Review, freshLimit: number): Review {
   }
 }
 
-// Reviews read back from the log: the last line of each id wins (a later approval rewrites one), in time order
+// Reviews read back from the log, in time order. A review is logged when it ends and again with each approval: the
+// last record of an id wins, but approvals only ever add, so one session's record never drops another's.
 export function latestById(list: Review[], keep: number): Review[] {
   const byId = new Map<string, Review>()
   for (const review of list) {
+    const before = byId.get(review.id)
+    const excepted = before ? [...new Set([...before.excepted, ...review.excepted])] : review.excepted
     byId.delete(review.id)
-    byId.set(review.id, review)
+    byId.set(review.id, { ...review, excepted })
   }
   return [...byId.values()].sort((a, b) => a.at - b.at).slice(-keep)
-}
-
-// A lock other processes can see. register.tsx keeps it in a git ref that `update-ref` creates only when absent.
-export type Lock = {
-  // Takes the lock if it is free: the id to drop it by, or undefined when someone else holds it (or it failed)
-  take: (stamp: string) => Promise<string | undefined>
-  // Who holds it: the stamp they took it with and its id, or undefined when free
-  peek: () => Promise<{ id: string; stamp: string } | undefined>
-  // Drops the lock only while it is still `id`
-  drop: (id: string) => Promise<void>
-}
-
-export type Clock = { now: () => Promise<number>; sleep: (ms: number) => Promise<void> }
-
-// A holder that crashed leaves its lock behind; past `staleMs` it is broken. Past `waitMs` the work runs unlocked —
-// one log line at risk is better than a review or an approval that never gets written. (A lock that fails while
-// nobody holds it — a leftover ref lockfile, a read-only repository — also ends there. It is not given up sooner:
-// under contention "free but not taken" is just someone else's turn, and giving up then loses lines.)
-export const LOCK_LIMITS = { staleMs: 5_000, waitMs: 8_000, stepMs: 50 }
-
-const stampTime = (stamp: string) => Number(stamp.split(' ').at(-1))
-
-export async function withLock<T>(
-  lock: Lock,
-  clock: Clock,
-  owner: string,
-  work: () => Promise<T>,
-  limits = LOCK_LIMITS,
-): Promise<T> {
-  const start = await clock.now()
-  let held: string | undefined
-  for (;;) {
-    held = await lock.take(`${owner} ${await clock.now()}`).catch(() => undefined)
-    if (held !== undefined) break
-    const now = await clock.now()
-    if (now - start >= limits.waitMs) break
-    const holder = await lock.peek().catch(() => undefined)
-    // An unreadable stamp is NaN, which never counts as fresh
-    if (holder !== undefined && !(now - stampTime(holder.stamp) < limits.staleMs)) {
-      await lock.drop(holder.id).catch(() => undefined)
-    }
-    await clock.sleep(limits.stepMs)
-  }
-  try {
-    return await work()
-  } finally {
-    if (held !== undefined) await lock.drop(held).catch(() => undefined)
-  }
-}
-
-// Runs the work it is given one at a time, in the order given — a session's own writes never interleave
-export function inOrder(): <T>(work: () => Promise<T>) => Promise<T> {
-  let tail: Promise<unknown> = Promise.resolve()
-  return work => {
-    const run = tail.then(work)
-    tail = run.catch(() => undefined)
-    return run
-  }
 }

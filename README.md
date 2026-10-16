@@ -32,7 +32,7 @@ breaks a core principle.
 3. A separate model (default sonnet) gets only the principles, the request, Claude's last report and the diff — never
    the author's reasoning.
 4. The status line and a toast report the result; when there are findings, a panel opens with **Send to Claude**,
-   **Review again** and **Approve as exception**. Approved exceptions are kept in `.git/motive-mem/decisions.jsonl` and
+   **Review again** and **Approve as exception**. Approved exceptions are kept in `.git/motive-mem/decisions/` and
    are not raised again.
 
 It turns on only when the session folder is inside a git repository that has `.claude/principles.md`. Install it at

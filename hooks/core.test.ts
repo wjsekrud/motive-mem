@@ -1,8 +1,8 @@
-import { describe, expect, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { Review } from '../types'
 import {
-  appendedLog,
   budgetDiff,
   buildPrompt,
   cut,
@@ -13,18 +13,20 @@ import {
   forReviewer,
   globToRegExp,
   hasIssues,
-  inOrder,
   levelOf,
   parseDiff,
   parsePrinciples,
   parseVerdict,
+  readRecords,
+  recordName,
+  resolvePath,
   reviewMarkdown,
   scopeHits,
   statusLine,
   systemPrompt,
   untrackedChunk,
-  withLock,
-  type Lock,
+  writeRecord,
+  type LogFs,
 } from './core'
 
 const PRINCIPLES = `# Principles
@@ -307,107 +309,210 @@ describe('panel', () => {
   })
 })
 
-// A file system whose reads and writes take a moment, so two writers interleave, and a lock kept in memory with
-// the same rules as the git ref: created only when absent, dropped only by its id.
-function world(now = 0) {
-  const files: Record<string, string> = {}
-  let held: { id: string; stamp: string } | undefined
-  let taken = 0
-  const tick = () => Promise.resolve()
-  const lock: Lock = {
-    take: async stamp => {
-      await tick()
-      if (held !== undefined) return undefined
-      held = { id: `id${++taken}`, stamp }
-      return held.id
-    },
-    peek: async () => held,
-    drop: async id => {
-      if (held?.id === id) held = undefined
-    },
+// Files shared by several sessions. Every step takes a moment, so sessions interleave, and a session can be
+// stalled before its writes land for as long as a test likes — asleep, or paused by the OS.
+function world() {
+  const files = new Map<string, string>()
+  const tick = async () => {
+    for (let i = 0; i < 3; i++) await Promise.resolve()
   }
-  const clock = {
-    now: async () => now,
-    sleep: async (ms: number) => {
-      now += ms
-      await tick()
-    },
+  const session = () => {
+    let gate: Promise<void> | undefined
+    let wake = () => {}
+    const fs: LogFs = {
+      list: async dir => {
+        await tick()
+        return [...files]
+          .filter(([path]) => path.startsWith(`${dir}/`))
+          .map(([path, text]) => ({ name: path.slice(dir.length + 1), size: text.length }))
+      },
+      read: async path => {
+        await tick()
+        const text = files.get(path)
+        if (text === undefined) throw new Error(`ENOENT: ${path}`)
+        return text
+      },
+      write: async (path, text) => {
+        await tick()
+        await gate
+        files.set(path, text)
+      },
+    }
+    return {
+      fs,
+      stall: () => void (gate = new Promise<void>(resolve => (wake = resolve))),
+      wake: () => wake(),
+    }
   }
-  const append = async (path: string, line: string) => {
-    await tick()
-    const text = files[path] ?? ''
-    await tick()
-    files[path] = text + `${line}\n`
-  }
-  return {
-    files,
-    lock,
-    clock,
-    append,
-    hold: (stamp: string) => (held = { id: 'other', stamp }),
-    holder: () => held,
-  }
+  return { files, session }
 }
 
-const QUICK = { staleMs: 10_000, waitMs: 15_000, stepMs: 50 }
+const failure = (work: Promise<unknown>) => work.then(
+  () => undefined,
+  (err: unknown) => String(err),
+)
 
 describe('shared logs', () => {
-  test('two sessions approving exceptions at once keep both records', async () => {
-    const plain = world()
-    await Promise.all([plain.append('d', 'a'), plain.append('d', 'b')])
-    expect(plain.files.d?.trim().split('\n').length).toBe(1) // unlocked, one is lost: the fake really interleaves
-
+  test('control: on these files, read-then-write loses a line, as the old log did', async () => {
     const w = world()
-    await Promise.all([
-      withLock(w.lock, w.clock, 'one', () => w.append('d', 'a'), QUICK),
-      withLock(w.lock, w.clock, 'two', () => w.append('d', 'b'), QUICK),
-    ])
-    expect(w.files.d?.trim().split('\n').sort()).toEqual(['a', 'b'])
-    expect(w.holder()).toBeUndefined()
+    const [a, b] = [w.session(), w.session()]
+    const append = async (s: typeof a, line: string) =>
+      s.fs.write('log', `${await s.fs.read('log').catch(() => '')}${line}\n`)
+    a.stall()
+    const stalled = append(a, 'a')
+    await append(b, 'b')
+    a.wake()
+    await stalled
+    expect(w.files.get('log')).toBe('a\n')
   })
 
-  test('completed reviews from many sessions all land, and the lock is let go', async () => {
+  // PR #274, first case: a writer paused after its read for 6.5 s, past the old lock's 5 s age
+  test('a session stalled in the middle of a write wipes no other record', async () => {
     const w = world()
-    const names = Array.from({ length: 8 }, (_, i) => `r${i}`)
-    await Promise.all(names.map(n => withLock(w.lock, w.clock, n, () => w.append('reviews', n), QUICK)))
-    expect(w.files.reviews?.trim().split('\n').sort()).toEqual(names)
-    expect(w.holder()).toBeUndefined()
+    const [a, b] = [w.session(), w.session()]
+    a.stall()
+    const stalled = writeRecord(a.fs, 'log', recordName(1_000, 'a', 0), 'a', 200)
+    await writeRecord(b.fs, 'log', recordName(7_500, 'b', 0), 'b', 200)
+    a.wake()
+    await stalled
+    expect((await readRecords<string>(b.fs, 'log', [], 30)).sort()).toEqual(['a', 'b'])
   })
 
-  test('a live holder is waited for; a stale one is broken', async () => {
-    const live = world(100_000)
-    live.hold('other 99000')
-    const order: string[] = []
-    const waiting = withLock(live.lock, live.clock, 'me', async () => void order.push('mine'), QUICK)
-    for (let i = 0; i < 20; i++) await Promise.resolve()
-    expect(order).toEqual([]) // still held, about a second old
-    await live.lock.drop('other')
-    await waiting
-    expect(order).toEqual(['mine'])
-
-    const stale = world(100_000)
-    stale.hold('crashed 50000')
-    let ran = false
-    await withLock(stale.lock, stale.clock, 'me', async () => void (ran = true), QUICK)
-    expect(ran).toBe(true)
-    expect(stale.holder()).toBeUndefined()
-  })
-
-  test('when the lock cannot be had, the write still happens after the wait', async () => {
+  // PR #274, second case: sessions that could not get the lock in time wrote unlocked. Now there is no lock to
+  // give up on, and a write that fails says so.
+  test('many sessions writing at once all land', async () => {
     const w = world()
-    const broken: Lock = { take: async () => undefined, peek: async () => undefined, drop: async () => undefined }
-    let ran = false
-    await withLock(broken, w.clock, 'me', async () => void (ran = true), { staleMs: 10_000, waitMs: 200, stepMs: 50 })
-    expect(ran).toBe(true)
+    const names = Array.from({ length: 8 }, (_, i) => `s${i}`)
+    await Promise.all(names.map(n => writeRecord(w.session().fs, 'log', recordName(5_000, n, 0), n, 200)))
+    expect((await readRecords<string>(w.session().fs, 'log', [], 30)).sort()).toEqual(names)
   })
 
-  test("a session's own writes run one at a time, in order", async () => {
+  test('a write that fails rejects, so the caller can say it was not saved', async () => {
+    const s = world().session()
+    const broken: LogFs = {
+      ...s.fs,
+      write: async () => {
+        throw new Error('EACCES')
+      },
+    }
+    expect(await failure(writeRecord(broken, 'log', recordName(1, 'a', 0), 'a', 200))).toContain('EACCES')
+    expect(await readRecords<string>(s.fs, 'log', [], 30)).toEqual([])
+  })
+
+  test('two sessions approving findings of one review both stay approved', async () => {
     const w = world()
-    const queue = inOrder()
-    await Promise.all(['a', 'b', 'c'].map(n => queue(() => w.append('own', n))))
-    expect(w.files.own).toBe('a\nb\nc\n')
+    const [a, b] = [w.session(), w.session()]
+    const done = review({ id: 'r', at: 1 })
+    a.stall()
+    const stalled = writeRecord(a.fs, 'reviews', recordName(2, 'a', 0), { ...done, excepted: [0] }, 200)
+    await writeRecord(b.fs, 'reviews', recordName(3, 'b', 0), { ...done, excepted: [1] }, 200)
+    a.wake()
+    await stalled
+    const restored = latestById(await readRecords<Review>(b.fs, 'reviews', [], 200), 40)
+    expect(restored[0]?.excepted.sort()).toEqual([0, 1])
   })
 
+  test('keeps the last records; the old log file is read only while they fall short', async () => {
+    const w = world()
+    const s = w.session()
+    w.files.set('old.jsonl', '"x"\n"y"\n')
+    await writeRecord(s.fs, 'log', recordName(1, 'a', 0), 'a', 2)
+    expect(await readRecords<string>(s.fs, 'log', ['old.jsonl'], 3)).toEqual(['x', 'y', 'a'])
+    await writeRecord(s.fs, 'log', recordName(2, 'a', 1), 'b', 2)
+    await writeRecord(s.fs, 'log', recordName(3, 'a', 2), 'c', 2)
+    expect(w.files.get(`log/${recordName(1, 'a', 0)}`)).toBe('')
+    expect(await readRecords<string>(s.fs, 'log', ['old.jsonl'], 2)).toEqual(['b', 'c'])
+    // One cut short, or still being written, is skipped
+    w.files.set(`log/${recordName(4, 'b', 0)}`, '"d')
+    expect(await readRecords<string>(s.fs, 'log', [], 5)).toEqual(['b', 'c'])
+  })
+
+  test('record names sort in time order', () => {
+    expect(recordName(9, 'z', 0) < recordName(10, 'a', 0)).toBe(true)
+  })
+
+  test("the repository's common .git, from what git prints", () => {
+    expect(resolvePath('C:/r/wgis', '../.git')).toBe('C:/r/.git')
+    expect(resolvePath('/home/u/r/a/b', '../../.git')).toBe('/home/u/r/.git')
+    expect(resolvePath('/home/u/r', '.git')).toBe('/home/u/r/.git')
+    expect(resolvePath('C:/w', 'C:/r/.git')).toBe('C:/r/.git')
+  })
+
+  test('a turn in a linked work tree: its review is a record of that work tree, the decisions are shared', async ($, on) => {
+    const clock = mock.clock(on)
+    const main = 'C:/main/.git'
+    const files: Record<string, string> = {
+      'C:/w/.claude/principles.md': PRINCIPLES,
+      [`${main}/motive-mem/decisions.jsonl`]: '{"at":1,"principle":"P01","file":"a.py","why":"legacy why"}\n',
+      [`${main}/motive-mem/decisions/${recordName(2, 'other', 0)}`]: '{"at":2,"principle":"P06","file":"b.py","why":"record why"}',
+    }
+    const gitCalls: string[][] = []
+    const prompts: string[] = []
+    let snaps = 0
+    const at = (path: string) => path.replace(/\\/g, '/')
+    on('session.cwd', async () => ({ value: 'C:/w' }))
+    on('process.run', async (_$, e) => {
+      const argv = [...e.argv]
+      const ok = (stdout = '') => ({
+        value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+      })
+      if (argv.includes('--show-toplevel')) return ok(`C:/w\n${main}/worktrees/w\n${main}\n`)
+      const args = argv.slice(argv.indexOf('-C') + 2)
+      gitCalls.push(args)
+      if (args[0] === 'stash') return ok(++snaps === 1 ? 'aaa\n' : 'bbb\n')
+      if (args[0] === 'diff' && !args.includes('--name-only')) {
+        return ok('diff --git a/app/core/a.py b/app/core/a.py\n--- a/app/core/a.py\n+++ b/app/core/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n')
+      }
+      return ok()
+    })
+    on('fs.exists', async (_$, e) => ({ value: at(e.path) in files }))
+    on('fs.read', async (_$, e) => {
+      const text = files[at(e.path)]
+      if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
+      return { value: text }
+    })
+    on('fs.write', async (_$, e) => {
+      files[at(e.path)] = e.text
+      return { value: undefined }
+    })
+    on('fs.list', async (_$, e) => {
+      const dir = `${at(e.path)}/`
+      const inside = Object.keys(files).filter(p => p.startsWith(dir) && !p.slice(dir.length).includes('/'))
+      if (inside.length === 0) throw new Error(`ENOENT: ${e.path}`)
+      return {
+        value: inside.map(p => ({ name: p.slice(dir.length), kind: 'file' as const, size: files[p]?.length ?? 0, mtimeMs: 0, isLink: false })),
+      }
+    })
+    on('ui.status', async () => ({ value: undefined }))
+    on('ui.toast', async () => ({ value: undefined }))
+    on('ui.log', async () => ({ value: undefined }))
+    on('turn.start', async (_$, e) => ({ turnId: e.turnId }))
+    on('turn.complete', async (_$, e) => ({ text: e.answer }))
+    on('model.complete', async (_$, e) => {
+      const prompt = e.prompt as string | readonly { text: string }[]
+      prompts.push(typeof prompt === 'string' ? prompt : prompt.map(block => block.text).join('\n\n'))
+      return {
+        value: {
+          isAnswered: true as const,
+          text: '{"summary":"s","intent":"match","findings":[],"unstated":[]}',
+          usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        },
+      }
+    })
+
+    await $.turn.start({ text: 'set x to 2', turnId: 't1' })
+    await $.turn.complete({ answer: 'Set x to 2.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+    await clock.settle()
+
+    expect(prompts.length).toBe(1)
+    expect(prompts[0]).toContain('P01 a.py: legacy why')
+    expect(prompts[0]).toContain('P06 b.py: record why')
+    const logged = Object.keys(files).filter(p => p.startsWith(`${main}/worktrees/w/motive-mem/reviews/`))
+    expect(logged.length).toBe(1)
+    expect(files[logged[0] ?? '']).toContain('"status":"done"')
+    // No lock: git is never asked to write a ref or an object for the logs
+    expect(gitCalls.filter(args => ['update-ref', 'hash-object'].includes(args[0] ?? ''))).toEqual([])
+  })
 })
 
 const diffOf = (path: string, body: string[]) =>
@@ -561,14 +666,6 @@ describe('the request keeps its shape', () => {
 })
 
 describe('the review log', () => {
-  test('stays under the size $.fs can read back', () => {
-    const big = 'x'.repeat(1000)
-    let text = ''
-    for (let i = 0; i < 50; i++) text = appendedLog(text, { i, big }, 200, 10_000)
-    expect(text.length).toBeLessThanOrEqual(10_000)
-    expect(text.trim().split('\n').at(-1)).toContain('"i":49')
-  })
-
   test('keeps the request and report clipped as the reviewer saw them', () => {
     const r = review({
       intent: { prompts: ['p'.repeat(5000)], answer: 'a'.repeat(9000) },
@@ -580,10 +677,15 @@ describe('the review log', () => {
     expect(logged.range.fresh.length).toBe(30)
   })
 
-  test('read back, the last line of each review wins, in time order', () => {
-    const lines = [review({ id: 'b', at: 2 }), review({ id: 'a', at: 1 }), review({ id: 'b', at: 2, excepted: [0] })]
+  test('read back, the last record of each review wins, in time order, with every approval', () => {
+    const lines = [
+      review({ id: 'b', at: 2 }),
+      review({ id: 'a', at: 1 }),
+      review({ id: 'b', at: 2, excepted: [1] }),
+      review({ id: 'b', at: 2, excepted: [0] }),
+    ]
     const restored = latestById(lines, 40)
     expect(restored.map(r => r.id)).toEqual(['a', 'b'])
-    expect(restored[1]?.excepted).toEqual([0])
+    expect(restored[1]?.excepted).toEqual([1, 0])
   })
 })

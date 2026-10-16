@@ -11,13 +11,11 @@ import type { Decision, FileChange, Intent, Review } from '../types'
 import {
   BINARY,
   PRINCIPLES_PATH,
-  appendedLog,
   buildPrompt,
   cut,
   fixPrompt,
   forLog,
   hasIssues,
-  inOrder,
   kindOf,
   latestById,
   levelOf,
@@ -26,18 +24,22 @@ import {
   parsePrinciples,
   parseVerdict,
   principleLabel,
+  readRecords,
+  recordName,
+  resolvePath,
   reviewMarkdown,
   scopeHits,
   statusLine,
   systemPrompt,
   untrackedChunk,
-  withLock,
-  type Lock,
+  writeRecord,
+  type LogFs,
 } from './core'
 import { WORDS, langOf, type Lang } from './text'
 
 type Engine = EngineInterface
-type Repo = { top: string; gitDir: string }
+// gitDir is this work tree's; commonDir is shared by every work tree of the repository
+type Repo = { top: string; gitDir: string; commonDir: string }
 type Snap = { rev: string; untracked: string[] }
 
 const PANE = 'motive-mem'
@@ -58,11 +60,12 @@ async function git($: Engine, repo: string, args: string[], stdin?: string) {
 async function gitRepo($: Engine): Promise<Repo | undefined> {
   const cwd = await $.session.cwd()
   const found = await $.process
-    .run(['git', '-C', cwd, 'rev-parse', '--show-toplevel', '--absolute-git-dir'])
+    .run(['git', '-C', cwd, 'rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'])
     .catch(() => undefined)
   if (found === undefined || found.exitCode !== 0) return undefined
-  const [top, gitDir] = found.stdout.trim().split(/\r?\n/)
-  return top && gitDir ? { top, gitDir } : undefined
+  const [top, gitDir, common] = found.stdout.trim().split(/\r?\n/)
+  // The common dir comes relative to cwd when it is the work tree's own .git
+  return top && gitDir && common ? { top, gitDir, commonDir: resolvePath(cwd, common) } : undefined
 }
 
 // When the mode is on: a git repository that has a principles file
@@ -161,77 +164,47 @@ async function changes(
   return { files, diff }
 }
 
-// ---- logs (.git/motive-mem — outside the work tree, so they never show up in the next turn's diff)
+// ---- logs (in .git — outside the work tree, so they never show up in the next turn's diff)
 
-async function readLines<T>($: Engine, path: string, limit: number): Promise<T[]> {
-  const text = await $.fs.read(path).catch(() => '')
-  return text
-    .split('\n')
-    .filter(Boolean)
-    .slice(-limit)
-    .flatMap(line => {
-      try {
-        return [JSON.parse(line) as T]
-      } catch {
-        return []
-      }
-    })
-}
+// Every session in the repository reads and writes these. A write adds a record file of its own (writeRecord in
+// core.ts): nothing is read and written back, so sessions never overwrite each other and none waits on a lock.
+// Reviews belong to a work tree; approved exceptions hold in every work tree of the repository.
+type Log = { dir: string; legacy: string[] }
 
-// Sessions in the same repository share these logs, and $.fs only reads and writes whole files. So a write holds
-// a git ref as the lock: `update-ref <ref> <id> ''` creates it only while it is absent, which git decides
-// atomically across processes. The ref points at a blob holding who took it and when (gc drops it afterwards).
-const LOCK_REF = 'refs/motive-mem/lock'
-const owner = Math.random().toString(36).slice(2)
-const oneAtATime = inOrder()
+const reviewLog = (repo: Repo): Log => ({
+  dir: `${repo.gitDir}/motive-mem/reviews`,
+  legacy: [`${repo.gitDir}/motive-mem/reviews.jsonl`],
+})
+const decisionLog = (repo: Repo): Log => ({
+  dir: `${repo.commonDir}/motive-mem/decisions`,
+  // Before 0.1.2 each work tree kept its own
+  legacy: [...new Set([`${repo.commonDir}/motive-mem/decisions.jsonl`, `${repo.gitDir}/motive-mem/decisions.jsonl`])],
+})
+const LOG_KEEP = 200
 
-function gitLock($: Engine, repo: Repo): Lock {
+// This session's mark in record names and review ids — another session's never matches it
+const owner = Math.random().toString(36).slice(2, 10) || 'x'
+let written = 0
+
+function logFs($: Engine): LogFs {
   return {
-    take: async stamp => {
-      const blob = await git($, repo.top, ['hash-object', '-w', '--stdin'], stamp)
-      const id = blob.stdout.trim()
-      if (blob.exitCode !== 0 || id === '') return undefined
-      const made = await git($, repo.top, ['update-ref', LOCK_REF, id, ''])
-      return made.exitCode === 0 ? id : undefined
-    },
-    peek: async () => {
-      const out = await git($, repo.top, ['cat-file', '--batch'], `${LOCK_REF}\n`)
-      const [head = '', ...body] = out.stdout.split('\n')
-      const [id, type] = head.split(' ')
-      return out.exitCode === 0 && type === 'blob' && id ? { id, stamp: body.join('\n').trim() } : undefined
-    },
-    drop: async id => {
-      await git($, repo.top, ['update-ref', '-d', LOCK_REF, id])
-    },
+    list: async dir => (await $.fs.list(dir)).map(entry => ({ name: entry.name, size: entry.size })),
+    read: path => $.fs.read(path),
+    write: (path, text) => $.fs.write(path, text),
   }
 }
 
-const READ_LIMIT = 4 * 1024 * 1024
-
-// The log as it stands: '' when there is none yet, or when it grew past what $.fs reads (it starts over then).
-// Any other failure to read throws — writing after it would wipe the lines that could not be read.
-async function logText($: Engine, path: string): Promise<string> {
-  if (!(await $.fs.exists(path))) return ''
-  const { size } = await $.fs.stat(path)
-  return size > READ_LIMIT ? '' : $.fs.read(path)
+async function addRecord($: Engine, log: Log, value: unknown) {
+  await writeRecord(logFs($), log.dir, recordName(await $.clock.now(), owner, written++), value, LOG_KEEP)
 }
 
-async function appendLine($: Engine, repo: Repo, path: string, value: unknown, keep: number) {
-  const clock = { now: () => $.clock.now(), sleep: (ms: number) => $.clock.sleep(ms) }
-  await oneAtATime(() =>
-    withLock(gitLock($, repo), clock, owner, async () => {
-      await $.fs.write(path, appendedLog(await logText($, path), value, keep))
-    }),
-  )
+async function readLog<T>($: Engine, log: Log, limit: number): Promise<T[]> {
+  return readRecords<T>(logFs($), log.dir, log.legacy, limit)
 }
-
-const reviewLog = (repo: Repo) => `${repo.gitDir}/motive-mem/reviews.jsonl`
-const decisionLog = (repo: Repo) => `${repo.gitDir}/motive-mem/decisions.jsonl`
-const LOG_KEEP = 200
 
 // A failed log write must not take the result with it: it is noted in the debug log
 async function logReview($: Engine, repo: Repo, review: Review) {
-  await appendLine($, repo, reviewLog(repo), forLog(review, FRESH_LIMIT), LOG_KEEP).catch(err =>
+  await addRecord($, reviewLog(repo), forLog(review, FRESH_LIMIT)).catch(err =>
     $.ui.log(`motive-mem: could not write the review log: ${String(err)}`, { to: 'debug' }),
   )
 }
@@ -287,7 +260,7 @@ async function review(
   const level = levelOf(files)
   const at = await $.clock.now()
   const draft: Review = {
-    id: `${at}-${serial++}`,
+    id: `${at}-${owner}-${serial++}`,
     at,
     origin,
     status: level === 'trivial' ? 'skipped' : 'running',
@@ -313,7 +286,7 @@ async function review(
   // From here on the draft is on screen as running: whatever happens, it ends as done or error — never stuck
   let done: Review
   try {
-    const decisions = await readLines<Decision>($, decisionLog(repo), 30)
+    const decisions = await readLog<Decision>($, decisionLog(repo), 30)
     const answer = await $.model.complete({
       model: config.model,
       effort: config.effort,
@@ -399,7 +372,7 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'motive-mem', description: w.command.description })
     const repo = await repoOf($)
     if (repo !== undefined && (await read($, reviews)).length === 0) {
-      const saved = latestById(await readLines<Review>($, reviewLog(repo), LOG_KEEP), KEEP)
+      const saved = latestById(await readLog<Review>($, reviewLog(repo), LOG_KEEP), KEEP)
       if (saved.length > 0) await update($, reviews, () => saved)
     }
     // A review the previous environment was still running (it was reloaded) never finishes: let it be run again
@@ -572,22 +545,19 @@ export const register: Register = (on, options) => {
                   )
                   // Already approved by an earlier press
                   if (updated === undefined) return
-                  $.ui.status(statusLine(updated, config.lang))
+                  const approved = updated
+                  $.ui.status(statusLine(approved, config.lang))
                   const decision: Decision = {
                     at: await $.clock.now(),
                     principle: finding.principle,
                     file: finding.file,
                     why: finding.why,
                   }
-                  const saved = await appendLine($, repo, decisionLog(repo), decision, LOG_KEEP).then(
-                    () => true,
-                    err => {
-                      $.ui.toast(words().notSaved(String(err)), { timeoutMs: 8000 })
-                      return false
-                    },
-                  )
-                  // The review's line again, with the approval, so a later session restores it approved
-                  if (saved) await logReview($, repo, updated)
+                  // The decision, then the review again with the approval so a later session restores it approved.
+                  // Either one not saved is said.
+                  await addRecord($, decisionLog(repo), decision)
+                    .then(() => addRecord($, reviewLog(repo), forLog(approved, FRESH_LIMIT)))
+                    .catch(err => $.ui.toast(words().notSaved(String(err)), { timeoutMs: 8000 }))
                 }}
               />
             ))}
